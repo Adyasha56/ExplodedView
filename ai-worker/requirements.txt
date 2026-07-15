@@ -1,0 +1,30 @@
+# ── PDF Processing ────────────────────────────────────────────────────────────
+PyMuPDF==1.24.5          # Direct PDF text + image extraction (Strategy A)
+pdfplumber==0.11.1       # Structured table extraction from vector PDFs
+
+# ── Computer Vision ───────────────────────────────────────────────────────────
+opencv-python-headless==4.6.0.66 # Contour detection, preprocessing, morphological ops.
+                                  # Headless variant: no GUI/display dependency (correct for server pipelines).
+                                  # Pinned to 4.6.0.66 — upper bound required by paddleocr==2.7.3.
+                                  # All operations we use (findContours, CLAHE, morphologyEx, etc.)
+                                  # have been stable since OpenCV 3.x — this pin is not a limitation.
+numpy==1.26.4            # Array operations required by OpenCV
+
+# ── OCR ───────────────────────────────────────────────────────────────────────
+paddlepaddle==2.6.2      # PaddleOCR runtime engine (CPU build)
+paddleocr==2.7.3         # OCR inference — fallback when direct extraction fails
+
+# ── Image Handling ────────────────────────────────────────────────────────────
+Pillow==10.3.0           # Image I/O used by PaddleOCR and preprocessing
+
+# ── Fuzzy Matching ────────────────────────────────────────────────────────────
+python-Levenshtein==0.25.1  # Edit distance for hotspot-to-BOM fuzzy matching
+
+# ── LLM ──────────────────────────────────────────────────────────────────────
+# Gemini 2.5 Flash is called via REST (requests) to avoid the protobuf version
+# conflict between google-generativeai (needs protobuf>=5) and paddlepaddle
+# (needs protobuf<=3.20.2 on Windows). requests is already a transitive dep.
+
+# ── Environment & Config ──────────────────────────────────────────────────────
+python-dotenv==1.0.1     # Load .env into os.environ
+setuptools               # Required by paddlepaddle at import time
