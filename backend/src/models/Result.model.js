@@ -6,7 +6,7 @@ const HotspotSchema = new mongoose.Schema(
     x:                { type: Number, required: true },
     y:                { type: Number, required: true },
     radius:           { type: Number, required: true },
-    extractionMethod: { type: String, enum: ['pymupdf', 'paddleocr'], required: true },
+    extractionMethod: { type: String, enum: ['pymupdf', 'paddleocr', 'paddleocr_enhanced', 'gemini_vision'], required: true },
   },
   { _id: false }
 );
