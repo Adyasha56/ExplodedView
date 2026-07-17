@@ -11,6 +11,9 @@ export function useJobPoller(jobId) {
   const timerRef = useRef(null);
 
   useEffect(() => {
+    setJob(null);
+    setResult(null);
+    setError(null);
     if (!jobId) return;
     let cancelled = false;
 
