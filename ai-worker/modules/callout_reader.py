@@ -3,31 +3,36 @@ Callout Reader
 
 Extracts the number printed inside each detected callout region.
 
-Priority (deterministic-first):
+Strategy priority (deterministic-first):
+
   Strategy A — PyMuPDF full-page text scan
                 Works when callout numbers are stored as embedded text (text-layer PDFs).
-                Fast and perfectly accurate.
+                Fast and perfectly accurate. Returns immediately if callouts found.
 
   Strategy B — Full-image PaddleOCR scan (2 passes)
                 Pass 1: Overlapping horizontal tiles across the full image.
-                        Finds the majority of callout numbers.
-                Pass 2: Seed-expansion — tight crops centred on each callout
-                        found in Pass 1. Catches numbers clustered in the same
-                        region that the broad tile scan misses due to detection
-                        window interference (e.g. digits 7, 8, 4 clustered near 13).
+                Pass 2: Seed-expansion — tight crops centred on each Pass 1 callout.
+                        Catches numbers clustered in the same region that the broad
+                        tile scan misses due to detection window interference.
 
-  Undetected callouts are NOT fabricated with placeholder coordinates.
-  The mapping engine reports them in unmappedBomRows; the frontend lists
-  them without overlay pins.
+  Strategy C — Per-circle targeted OCR (recovery pass)
+                For each accepted circle from the circle detector, crops and OCRs
+                individually. Recovers callouts missed by the broad tile scan in dense
+                clusters. Uses circle geometry as canonical coordinates rather than OCR
+                bounding boxes. Fires only when the circle list is non-empty.
 
-Known failure modes addressed in this implementation:
-  - Leader-line contamination: "10-" or "-6" → stripped from both ends
-  - Dense cluster occlusion: seed-expansion with tight 80px crops finds
-    adjacent digits missed by the 1461px tile scan
-  - Bobcat logo watermark overlap: tight crop padding (40px) isolates
-    digits from adjacent logo bounding boxes
+  False-positive filtering (circled-callout documents only):
+                After all OCR passes, assess whether the page uses circled callouts by
+                measuring what fraction of OCR hits spatially align with detected circles.
+                If the alignment evidence is strong enough, reject OCR hits that have no
+                spatial relationship to any accepted circle (e.g. page numbers, footers).
+                Pages without strong circle evidence (plain-number or leader-line style)
+                are not filtered.
+
+Undetected callouts produce no entry. They surface as unpositionedBomRows.
 """
 
+import math
 import re
 import time
 
@@ -47,18 +52,27 @@ _DIGIT_RE = re.compile(r"^\d{1,2}$")
 
 _ocr_engine = None
 
-# Radius (px) around each seed callout searched in Pass 2.
+# ── Pass 1 / Pass 2 tuning 
 _SEED_SEARCH_RADIUS = 350
+_CROP_MIN_DIM       = 150
+_PASS1_MIN_SCORE    = 0.50
+_PASS2_MIN_SCORE    = 0.40
 
-# Minimum dimension (px) a crop is upscaled to before OCR.
-_CROP_MIN_DIM = 150
+# ── Strategy C tuning 
+# Extra pixels beyond the circle radius added to each side of the crop.
+_STRATEGY_C_PADDING_PX  = 8
+# Tight crops are well-isolated; a slightly lower threshold is acceptable.
+_STRATEGY_C_MIN_SCORE   = 0.35
 
-# Minimum OCR confidence accepted in the broad tile pass.
-_PASS1_MIN_SCORE = 0.50
-
-# Minimum OCR confidence accepted in the tight seed-expansion pass.
-# Lower because upscaled tight crops have sparser context for the recogniser.
-_PASS2_MIN_SCORE = 0.40
+# ── Circled-callout page style detection 
+# Fewer detected circles than this → skip classification entirely.
+_CIRCLED_CALLOUT_MIN_CIRCLES          = 3
+# Fraction of OCR hits that must align with a circle to confirm circled-callout style.
+# Set high (0.85) because the circle detector has a meaningful miss rate — valid
+# callouts whose circles weren't detected appear non-aligned and must not be filtered.
+_CIRCLED_CALLOUT_ALIGNMENT_THRESHOLD  = 0.85
+# A hit "aligns" with a circle when its distance to the circle centre ≤ radius × this.
+_CIRCLED_CALLOUT_PROXIMITY_MULTIPLIER = 2.5
 
 
 def read_callouts(
@@ -74,7 +88,7 @@ def read_callouts(
     t_start = time.perf_counter()
     logger.info("read_callouts: diagram %dx%d", diagram_image.shape[1], diagram_image.shape[0])
 
-    # Strategy A — PyMuPDF text layer (free, zero error risk)
+    # Strategy A — PyMuPDF text layer
     if pdf_page is not None:
         results = _pymupdf_full_page_scan(pdf_page)
         if results:
@@ -87,8 +101,8 @@ def read_callouts(
             return results
         logger.info("  Strategy A: 0 text callouts — falling back to OCR")
 
-    # Strategy B — PaddleOCR (2 passes)
-    results = _paddleocr_scan(diagram_image)
+    # Strategy B (Pass 1 + Pass 2) + Strategy C + filtering
+    results = _paddleocr_scan(diagram_image, circles)
     results = _deduplicate(results)
 
     elapsed = (time.perf_counter() - t_start) * 1000
@@ -99,11 +113,14 @@ def read_callouts(
     return results
 
 
-# ── Strategy A ────────────────────────────────────────────────────────────────
+# ── Strategy A 
 
 def _pymupdf_full_page_scan(pdf_page) -> list[dict]:
-    scale = PDF_RENDER_DPI / 72
-    callouts = []
+    scale        = PDF_RENDER_DPI / 72
+    page_h_px    = pdf_page.rect.height * scale
+    top_cut_px   = page_h_px * 0.10
+    bottom_cut_px = page_h_px * 0.90
+    callouts     = []
     seen: set[str] = set()
 
     for block in pdf_page.get_text("dict")["blocks"]:
@@ -117,6 +134,9 @@ def _pymupdf_full_page_scan(pdf_page) -> list[dict]:
                 bbox = span["bbox"]
                 cx = int(((bbox[0] + bbox[2]) / 2) * scale)
                 cy = int(((bbox[1] + bbox[3]) / 2) * scale)
+                if cy < top_cut_px or cy > bottom_cut_px:
+                    logger.debug("  PyMuPDF: skipping border-area '%s' at (%d,%d)", text, cx, cy)
+                    continue
                 r  = max(int(((bbox[3] - bbox[1]) / 2) * scale), 10)
                 callouts.append({"x": cx, "y": cy, "radius": r,
                                   "number": text, "extraction_method": "pymupdf"})
@@ -127,22 +147,22 @@ def _pymupdf_full_page_scan(pdf_page) -> list[dict]:
     return callouts
 
 
-# ── Strategy B ────────────────────────────────────────────────────────────────
+# ── Strategy B + C 
 
-def _paddleocr_scan(diagram_image: np.ndarray) -> list[dict]:
-    h, w = diagram_image.shape[:2]
-    top_cut    = int(h * 0.03)
-    bottom_cut = int(h * 0.97)
+def _paddleocr_scan(diagram_image: np.ndarray, circles: list[dict]) -> list[dict]:
+    h, w       = diagram_image.shape[:2]
+    top_cut    = int(h * 0.10)
+    bottom_cut = int(h * 0.90)
     engine     = _get_ocr_engine()
 
-    found: dict[str, dict] = {}  # number → best candidate
+    found: dict[str, dict] = {}
 
-    # ── Pass 1: overlapping horizontal tiles ──────────────────────────────────
-    tile_h    = h // 3
-    overlap   = tile_h // 4
-    starts    = [0, tile_h - overlap, 2 * tile_h - 2 * overlap]
-    ends      = [s + tile_h + overlap for s in starts]
-    ends[-1]  = h
+    # ── Pass 1: overlapping horizontal tiles 
+    tile_h  = h // 3
+    overlap = tile_h // 4
+    starts  = [0, tile_h - overlap, 2 * tile_h - 2 * overlap]
+    ends    = [s + tile_h + overlap for s in starts]
+    ends[-1] = h
 
     for i, (y0, y1) in enumerate(zip(starts, ends)):
         tile       = diagram_image[y0:y1, :]
@@ -174,11 +194,7 @@ def _paddleocr_scan(diagram_image: np.ndarray) -> list[dict]:
     logger.info("  Pass 1 complete: %d callout(s): %s",
                 len(found), sorted(int(k) for k in found))
 
-    # ── Pass 2: seed-expansion around each found callout ─────────────────────
-    # For every callout found in Pass 1, scan a _SEED_SEARCH_RADIUS window
-    # around it with tight crops. This catches digits that share a local
-    # neighbourhood with an already-detected number but were suppressed by the
-    # broader tile detection window (e.g. 7, 8, 4 near 13).
+    # ── Pass 2: seed-expansion around each found callout 
     seeds_before = len(found)
 
     for seed_num, seed in list(found.items()):
@@ -192,9 +208,8 @@ def _paddleocr_scan(diagram_image: np.ndarray) -> list[dict]:
         if region.size == 0:
             continue
 
-        # Upscale small regions so digits occupy enough pixels for detection
-        rh, rw     = region.shape[:2]
-        scale_up   = max(1.0, _CROP_MIN_DIM / min(rh, rw))
+        rh, rw   = region.shape[:2]
+        scale_up = max(1.0, _CROP_MIN_DIM / min(rh, rw))
         if scale_up > 1.0:
             region = cv2.resize(region,
                                 (int(rw * scale_up), int(rh * scale_up)),
@@ -232,22 +247,193 @@ def _paddleocr_scan(diagram_image: np.ndarray) -> list[dict]:
             logger.debug("  Pass 2: '%s' (%.2f) at (%d,%d) via seed #%s (%d,%d)",
                          text, score, cx, cy, seed_num, sx, sy)
 
-    new_in_pass2 = len(found) - seeds_before
     logger.info("  Pass 2 added %d new callout(s). Total: %s",
-                new_in_pass2, sorted(int(k) for k in found))
+                len(found) - seeds_before, sorted(int(k) for k in found))
 
-    return list(found.values())
+    # ── Strategy C: per-circle targeted OCR 
+    _per_circle_ocr(diagram_image, circles, found, engine)
+
+    # ── Circled-callout style detection and false-positive filtering 
+    results = list(found.values())
+    results = _filter_non_callout_text(results, circles)
+
+    return results
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+def _per_circle_ocr(
+    diagram_image: np.ndarray,
+    circles: list[dict],
+    found: dict[str, dict],
+    engine,
+) -> None:
+    """
+    Recovery pass: OCR each accepted circle individually.
+
+    Crops a tight window around each detected circle, upscales, and OCRs.
+    Among all digit detections within the crop, selects the one closest to the
+    crop centre (most likely the callout number, not an adjacent artefact).
+
+    Only adds callouts NOT already found by Pass 1/2. Does not override
+    coordinates from existing hits — tile-scan results may have come from
+    a different (possibly better) position for the same digit.
+
+    Uses circle centre as canonical coordinates, which are more reliable than
+    OCR bounding-box centres in dense clusters.
+    """
+    if not circles:
+        return
+
+    h, w             = diagram_image.shape[:2]
+    border_cut_top   = int(h * 0.10)
+    border_cut_y     = int(h * 0.90)
+    recovered        = 0
+
+    for circle in circles:
+        if circle["y"] < border_cut_top or circle["y"] > border_cut_y:
+            logger.debug(
+                "  Strategy C: skipping border-area circle at (%d,%d) r=%d",
+                circle["x"], circle["y"], circle["radius"],
+            )
+            continue
+        cx, cy, r = circle["x"], circle["y"], circle["radius"]
+        pad = r + _STRATEGY_C_PADDING_PX
+        x0  = max(0, cx - pad)
+        y0  = max(0, cy - pad)
+        x1  = min(w, cx + pad)
+        y1  = min(h, cy + pad)
+        crop = diagram_image[y0:y1, x0:x1]
+        if crop.size == 0:
+            continue
+
+        ch, cw   = crop.shape[:2]
+        scale_up = max(1.0, _CROP_MIN_DIM / min(ch, cw))
+        if scale_up > 1.0:
+            crop = cv2.resize(crop,
+                              (int(cw * scale_up), int(ch * scale_up)),
+                              interpolation=cv2.INTER_CUBIC)
+
+        ocr_result = engine.ocr(crop, cls=OCR_USE_ANGLE_CLS)
+        if not ocr_result or not ocr_result[0]:
+            continue
+
+        # Among all digit hits in this crop, pick the one closest to the crop centre.
+        # Dividing by scale_up converts back to original-resolution coordinates.
+        crop_cx_orig = cw / 2.0
+        crop_cy_orig = ch / 2.0
+
+        best_text  = None
+        best_score = 0.0
+        best_dist  = float("inf")
+
+        for line in ocr_result[0]:
+            bbox_pts = line[0]
+            text     = _clean(line[1][0])
+            score    = line[1][1]
+
+            if not _DIGIT_RE.match(text) or score < _STRATEGY_C_MIN_SCORE:
+                continue
+
+            box_cx = sum(p[0] for p in bbox_pts) / 4 / scale_up
+            box_cy = sum(p[1] for p in bbox_pts) / 4 / scale_up
+            dist   = math.sqrt((box_cx - crop_cx_orig) ** 2 + (box_cy - crop_cy_orig) ** 2)
+
+            if best_text is None or score > best_score or (
+                abs(score - best_score) < 0.05 and dist < best_dist
+            ):
+                best_text  = text
+                best_score = score
+                best_dist  = dist
+
+        if best_text is None:
+            continue
+
+        # Normalise: strip leading zeros ("06" → "6"). Reject bare "0" (invalid callout).
+        best_text = best_text.lstrip("0") or "0"
+        if best_text == "0":
+            logger.debug("  Strategy C: rejected '0' (invalid callout number) at circle (%d,%d)", cx, cy)
+            continue
+
+        if best_text not in found:
+            found[best_text] = {
+                "x": cx, "y": cy, "radius": r,
+                "number": best_text, "extraction_method": "paddleocr",
+                "score": round(best_score, 3),
+            }
+            recovered += 1
+            logger.debug(
+                "  Strategy C: recovered '%s' (%.2f) at circle (%d,%d) r=%d",
+                best_text, best_score, cx, cy, r,
+            )
+
+    logger.info(
+        "  Strategy C: recovered %d new callout(s). Total after C: %s",
+        recovered, sorted(int(k) for k in found),
+    )
+
+
+def _filter_non_callout_text(
+    results: list[dict],
+    circles: list[dict],
+) -> list[dict]:
+    """
+    Reject OCR hits that are not associated with any detected callout circle,
+    but only when the page is confidently identified as circled-callout style.
+
+    Classification: compute what fraction of OCR hits spatially align with a
+    detected circle (distance to nearest circle centre ≤ radius × proximity
+    multiplier). If the majority align, the page uses circled callouts and any
+    non-aligned hit is non-callout text (page number, title block, footer, etc.).
+
+    Pages with fewer than _CIRCLED_CALLOUT_MIN_CIRCLES detected circles are not
+    classified — plain-number and leader-line documents pass through unfiltered.
+    """
+    if len(circles) < _CIRCLED_CALLOUT_MIN_CIRCLES or not results:
+        return results
+
+    def nearest_circle_ratio(hit: dict) -> float:
+        """Minimum (distance / radius) across all circles — < 1.5 means aligned."""
+        hx, hy = hit["x"], hit["y"]
+        return min(
+            math.sqrt((hx - c["x"]) ** 2 + (hy - c["y"]) ** 2) / c["radius"]
+            for c in circles
+        )
+
+    ratios         = [nearest_circle_ratio(r) for r in results]
+    aligned_flags  = [ratio <= _CIRCLED_CALLOUT_PROXIMITY_MULTIPLIER for ratio in ratios]
+    aligned_count  = sum(aligned_flags)
+    alignment_ratio = aligned_count / len(results)
+
+    logger.info(
+        "  Circle-callout detection: %d/%d hits align with circles "
+        "(ratio=%.2f, threshold=%.2f)",
+        aligned_count, len(results), alignment_ratio, _CIRCLED_CALLOUT_ALIGNMENT_THRESHOLD,
+    )
+
+    # Only filter when the evidence is very strong (near-unanimous alignment).
+    # The circle detector has a meaningful miss rate — valid callout circles are
+    # sometimes not detected, so their OCR hits appear non-aligned through no fault
+    # of the callout reader. Over-filtering is worse than under-filtering: a wrongly
+    # rejected callout becomes a silently missing hotspot, whereas a wrongly kept hit
+    # becomes an unmapped hotspot the mapping engine handles gracefully.
+    if alignment_ratio >= _CIRCLED_CALLOUT_ALIGNMENT_THRESHOLD:
+        logger.info("  Circled-callout page style confirmed (strong) — filtering non-aligned OCR hits")
+        filtered = [r for r, aligned in zip(results, aligned_flags) if aligned]
+        rejected = [r["number"] for r, aligned in zip(results, aligned_flags) if not aligned]
+        if rejected:
+            logger.info("  Rejected non-callout text: %s", rejected)
+        return filtered
+
+    logger.info(
+        "  Circled-callout page style NOT confirmed (ratio=%.2f < %.2f) — no filtering applied",
+        alignment_ratio, _CIRCLED_CALLOUT_ALIGNMENT_THRESHOLD,
+    )
+    return results
+
+
+# ── Helpers 
 
 def _clean(text: str) -> str:
-    """
-    Strip leading AND trailing non-digit characters.
-      "10-"  → "10"   trailing dash from adjacent leader line
-      "-6"   → "6"    prefix dash from leader line on the left
-      "-13-" → "13"   both sides
-    """
+    """Strip leading and trailing non-digit characters from OCR output."""
     return re.sub(r"^\D+|\D+$", "", text.strip())
 
 
