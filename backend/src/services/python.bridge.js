@@ -127,9 +127,12 @@ async function _handleSuccess(jobId, durationMs) {
     throw new Error(`result.json is not valid JSON: ${err.message}`);
   }
 
-  // Python writes artifact-relative path; transform to Express static URL.
-  if (resultData.diagramImagePath) {
-    resultData.diagramImagePath = '/static/' + resultData.diagramImagePath.replace(/\\/g, '/');
+  // Python writes artifact-relative paths inside each assembly; transform to Express static URLs.
+  if (Array.isArray(resultData.assemblies)) {
+    resultData.assemblies = resultData.assemblies.map((assembly) => ({
+      ...assembly,
+      diagramImagePath: '/static/' + assembly.diagramImagePath.replace(/\\/g, '/'),
+    }));
   }
 
   await Result.create({ ...resultData, jobId });

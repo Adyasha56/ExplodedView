@@ -43,9 +43,14 @@ exports.getResult = async (req, res, next) => {
       return res.status(500).json({ error: 'Result document not found despite job completion.' });
     }
 
-    logger.info(`[${jobId}] Result fetched — ${result.mappings.length} mappings, ` +
-      `${result.unmappedHotspots.length} unmapped hotspots, ` +
-      `${result.unpositionedBomRows.length} unpositioned BOM rows`);
+    const totalMappings = result.assemblies.reduce((n, a) => n + a.mappings.length, 0);
+    const totalUnmapped = result.assemblies.reduce((n, a) => n + a.unmappedHotspots.length, 0);
+    const totalUnpositioned = result.assemblies.reduce((n, a) => n + a.unpositionedBomRows.length, 0);
+    logger.info(
+      `[${jobId}] Result fetched — ${result.assemblies.length} assembly(ies), ` +
+      `${totalMappings} mappings, ${totalUnmapped} unmapped hotspots, ` +
+      `${totalUnpositioned} unpositioned BOM rows`
+    );
 
     return res.json(result);
 

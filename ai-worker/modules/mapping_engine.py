@@ -13,10 +13,12 @@ three-stage deterministic pipeline:
              Only the single best unclaimed row is claimed per hotspot.
 
 Output keys:
-  mappings              — one entry per detected hotspot; bom[] is always an array
+  mappings              — one entry per detected hotspot; bom[] contains only
+                          visible (non-NOT SHOWN) rows
   unmapped_hotspots     — hotspots with no BOM match (exact or fuzzy)
-  unpositioned_bom_rows — BOM rows not claimed by any hotspot (OCR never found
-                          the corresponding callout on the diagram)
+  unpositioned_bom_rows — BOM rows not claimed by any hotspot, excluding NOT SHOWN
+  not_shown_bom_rows    — BOM rows explicitly marked NOT SHOWN; these have no
+                          diagram position by definition and are reported separately
 """
 
 import time
@@ -84,26 +86,41 @@ def map_hotspots_to_bom(
             })
             logger.debug("  callout #%s -> no BOM match", callout["number"])
 
-    unpositioned_bom_rows = [
-        bom_rows[i] for i in range(len(bom_rows)) if i not in claimed_bom_indices
-    ]
+    # Split NOT SHOWN rows out of each mapping's bom[] into the assembly-level list.
+    # A NOT SHOWN row has no diagram position by definition — keeping it inside the
+    # hotspot's bom[] would mislead the frontend into rendering it as a positioned part.
+    not_shown_bom_rows: list[dict] = []
+    for mapping in mappings:
+        visible  = [r for r in mapping["bom"] if not _is_not_shown(r)]
+        not_shown = [r for r in mapping["bom"] if _is_not_shown(r)]
+        mapping["bom"] = visible
+        not_shown_bom_rows.extend(not_shown)
+
+    # Unclaimed rows: split into genuinely unpositioned vs. NOT SHOWN.
+    unclaimed = [bom_rows[i] for i in range(len(bom_rows)) if i not in claimed_bom_indices]
+    unpositioned_bom_rows = [r for r in unclaimed if not _is_not_shown(r)]
+    not_shown_bom_rows.extend(r for r in unclaimed if _is_not_shown(r))
 
     elapsed = (time.perf_counter() - t_start) * 1000
     logger.info(
         "map_hotspots_to_bom complete in %.1f ms — "
-        "%d mapped, %d unmapped hotspots, %d unpositioned BOM rows",
-        elapsed, len(mappings), len(unmapped_hotspots), len(unpositioned_bom_rows),
+        "%d mapped, %d unmapped hotspots, %d unpositioned BOM rows, %d not-shown rows",
+        elapsed, len(mappings), len(unmapped_hotspots),
+        len(unpositioned_bom_rows), len(not_shown_bom_rows),
     )
 
     if unmapped_hotspots:
         logger.info("  unmapped hotspots: %s", [h["number"] for h in unmapped_hotspots])
     if unpositioned_bom_rows:
         logger.info("  unpositioned BOM rows: %s", [r["ref_no"] for r in unpositioned_bom_rows])
+    if not_shown_bom_rows:
+        logger.info("  not-shown BOM rows: %s", [r["ref_no"] for r in not_shown_bom_rows])
 
     return {
         "mappings":              mappings,
         "unmapped_hotspots":     unmapped_hotspots,
         "unpositioned_bom_rows": unpositioned_bom_rows,
+        "not_shown_bom_rows":    not_shown_bom_rows,
     }
 
 
@@ -131,12 +148,18 @@ def _find_all_matches(
     if exact_indices:
         return exact_indices, MAPPING_CONFIDENCE_EXACT
 
-    # Stage 3 — Fuzzy match: single best unclaimed row
+    # Stage 3 — Fuzzy match: single best unclaimed row.
+    # Skip when both sides are pure integers: "42" vs "4" has edit distance 1
+    # but they are numerically unrelated (page numbers, section labels, etc.).
+    # Fuzzy matching is only meaningful when at least one side has non-digit chars
+    # (e.g. "1A" → "1").
     best_idx:  int | None = None
     best_dist: int        = MAPPING_MAX_EDIT_DISTANCE + 1
 
     for i, (ref, _) in enumerate(norm_bom):
         if i in already_claimed:
+            continue
+        if norm_callout.isdigit() and ref.isdigit():
             continue
         dist = levenshtein_distance(norm_callout, ref)
         if dist <= MAPPING_MAX_EDIT_DISTANCE and dist < best_dist:
@@ -150,6 +173,10 @@ def _find_all_matches(
 
 
 # ── Normalisation ──────────────────────────────────────────────────────────────
+
+def _is_not_shown(row: dict) -> bool:
+    return "NOT SHOWN" in (row.get("description") or "").upper()
+
 
 def _normalise_ref(ref_no: str) -> str:
     return ref_no.strip().lstrip("0") or "0"

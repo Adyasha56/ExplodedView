@@ -1,18 +1,22 @@
 """
 Page Classifier
 
-Determines which page in the PDF is the exploded-view diagram and which
-is the BOM table, using structural heuristics — no ML required.
+Discovers all diagram–BOM pairs in a PDF using structural heuristics.
 
-Priority (deterministic-first):
-  1. pdfplumber table detection  → BOM candidate (page with most table cells)
-  2. PyMuPDF path density        → diagram candidate (page with most vector paths)
-  3. Positional fallback         → first page = diagram, last page = BOM
+Strategy:
+  1. pdfplumber table detection — identify all BOM candidate pages (high cell count)
+  2. Pair selection — iterate BOM candidates in page order. For each BOM page,
+     the diagram is the adjacent non-table page (page before preferred, page after
+     as fallback). Pages already assigned to a pair are not reused.
+  3. Positional fallback — if no pairs found, return [(page 0, last page)] with
+     confidence: low.
+
+Returns a list of pair dicts so callers can process every assembly in the PDF.
+Single-assembly PDFs return a list with one item.
 """
 
 import time
 
-import fitz  # PyMuPDF
 import pdfplumber
 
 from config import PAGE_CLASSIFIER_MIN_TABLE_CELLS
@@ -21,17 +25,16 @@ from utils.logger import get_logger
 logger = get_logger("page_classifier")
 
 
-def classify_pages(pdf_path: str) -> dict:
+def classify_pages(pdf_path: str) -> list[dict]:
     """
-    Returns { diagram_page_index, bom_page_index, classification_confidence }.
-    classification_confidence is "low" when the positional fallback was used.
+    Returns a list of { diagram_page_index, bom_page_index, classification_confidence }.
+    One item per discovered assembly pair. Single-assembly PDFs return a one-item list.
     Raises ValueError if the PDF has fewer than 2 pages.
     """
     t_start = time.perf_counter()
     logger.info("classify_pages: opening %s", pdf_path)
 
-    # ── Strategy 1: pdfplumber table detection → BOM candidate ────────────────
-    bom_page_index = None
+    # ── Strategy 1: pdfplumber table detection → find all BOM candidates ──────
     bom_cell_counts = []
 
     with pdfplumber.open(pdf_path) as pdf:
@@ -47,83 +50,84 @@ def classify_pages(pdf_path: str) -> dict:
             bom_cell_counts.append(cell_count)
             logger.debug("  page %d: %d table cells detected", i, cell_count)
 
-    best_bom_page = max(range(n_pages), key=lambda i: bom_cell_counts[i])
-    if bom_cell_counts[best_bom_page] >= PAGE_CLASSIFIER_MIN_TABLE_CELLS:
-        bom_page_index = best_bom_page
-        logger.info(
-            "  BOM candidate: page %d (%d cells) — Strategy 1 (table detection)",
-            bom_page_index,
-            bom_cell_counts[bom_page_index],
-        )
+    # All pages with significant table content are BOM candidates.
+    bom_candidates = sorted(
+        [i for i in range(n_pages) if bom_cell_counts[i] >= PAGE_CLASSIFIER_MIN_TABLE_CELLS]
+    )  # page order, not cell-count order — preserves document sequence
 
-    # ── Strategy 2: PyMuPDF path density → diagram candidate ──────────────────
-    diagram_page_index = None
-    path_counts = []
+    logger.info(
+        "  BOM candidates (page order, cell counts): %s",
+        [(i, bom_cell_counts[i]) for i in bom_candidates],
+    )
 
-    with fitz.open(pdf_path) as doc:
-        for i, page in enumerate(doc):
-            paths = page.get_drawings()
-            path_counts.append(len(paths))
-            logger.debug("  page %d: %d vector paths detected", i, len(paths))
+    # ── Strategy 2: pair each BOM page with its adjacent diagram page ─────────
+    # Iterate in page order. Each BOM page claims its diagram from the adjacent
+    # non-table page. Pages already claimed are not reused across pairs.
+    pairs: list[dict] = []
+    used_pages: set[int] = set()
 
-    best_diagram_page = max(range(n_pages), key=lambda i: path_counts[i])
+    for bom_idx in bom_candidates:
+        if bom_idx in used_pages:
+            continue
 
-    # Prefer the page with the most vector paths, but never pick the BOM page
-    # when a separate BOM page was confidently detected.
-    if bom_page_index is not None and best_diagram_page != bom_page_index:
-        diagram_page_index = best_diagram_page
-    elif bom_page_index is not None:
-        # BOM page has the most paths (unusual); pick next best
-        sorted_by_paths = sorted(range(n_pages), key=lambda i: path_counts[i], reverse=True)
-        for candidate in sorted_by_paths:
-            if candidate != bom_page_index:
-                diagram_page_index = candidate
-                break
-    else:
-        diagram_page_index = best_diagram_page
+        diagram_idx = None
 
-    if diagram_page_index is not None:
-        logger.info(
-            "  Diagram candidate: page %d (%d paths) — Strategy 2 (path density)",
-            diagram_page_index,
-            path_counts[diagram_page_index],
-        )
+        # Prefer the page immediately before (standard [diagram, BOM] layout)
+        prev = bom_idx - 1
+        if (
+            prev >= 0
+            and prev not in used_pages
+            and bom_cell_counts[prev] < PAGE_CLASSIFIER_MIN_TABLE_CELLS
+        ):
+            diagram_idx = prev
+
+        # Fallback: check page after
+        if diagram_idx is None:
+            nxt = bom_idx + 1
+            if (
+                nxt < n_pages
+                and nxt not in used_pages
+                and bom_cell_counts[nxt] < PAGE_CLASSIFIER_MIN_TABLE_CELLS
+            ):
+                diagram_idx = nxt
+
+        if diagram_idx is not None:
+            pairs.append({
+                "diagram_page_index":        diagram_idx,
+                "bom_page_index":            bom_idx,
+                "classification_confidence": "high",
+            })
+            used_pages.add(diagram_idx)
+            used_pages.add(bom_idx)
+            logger.info(
+                "  Assembly %d: diagram=page%d, bom=page%d (%d cells)",
+                len(pairs) - 1, diagram_idx, bom_idx, bom_cell_counts[bom_idx],
+            )
+        else:
+            logger.warning(
+                "  BOM page %d has no available adjacent non-table page — skipping",
+                bom_idx,
+            )
 
     # ── Strategy 3: positional fallback ───────────────────────────────────────
-    confidence = "high"
-
-    if bom_page_index is None:
-        bom_page_index = n_pages - 1
-        diagram_page_index = 0
-        confidence = "low"
+    if not pairs:
         logger.warning(
-            "  No table detected above threshold (%d cells). "
-            "Falling back to page 0=diagram, page %d=BOM — confidence: low",
+            "  No pairs found (no table detected above %d-cell threshold or no "
+            "adjacent diagram page). Falling back to page 0=diagram, page %d=BOM — "
+            "confidence: low",
             PAGE_CLASSIFIER_MIN_TABLE_CELLS,
-            bom_page_index,
+            n_pages - 1,
         )
-    elif diagram_page_index is None:
-        # Should never happen for n_pages >= 2, but guard anyway
-        diagram_page_index = 0 if bom_page_index != 0 else 1
-        confidence = "low"
-        logger.warning("  Diagram page could not be determined; using fallback index %d", diagram_page_index)
-
-    if diagram_page_index == bom_page_index:
-        diagram_page_index = 0 if bom_page_index != 0 else 1
-        confidence = "low"
-        logger.warning("  diagram and BOM resolved to same page; forced diagram to page %d", diagram_page_index)
+        pairs.append({
+            "diagram_page_index":        0,
+            "bom_page_index":            n_pages - 1,
+            "classification_confidence": "low",
+        })
 
     elapsed = (time.perf_counter() - t_start) * 1000
     logger.info(
-        "classify_pages complete in %.1f ms — diagram=page%d, bom=page%d, confidence=%s",
-        elapsed,
-        diagram_page_index,
-        bom_page_index,
-        confidence,
+        "classify_pages complete in %.1f ms — %d assembly pair(s) found",
+        elapsed, len(pairs),
     )
 
-    return {
-        "diagram_page_index": diagram_page_index,
-        "bom_page_index": bom_page_index,
-        "classification_confidence": confidence,
-    }
+    return pairs
