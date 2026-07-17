@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import config
+from config import GEMINI_API_KEY, LLM_ENABLED
 from constants.pipeline_state import PipelineState, STEP_LABELS
 from utils.logger import get_logger
 
@@ -58,7 +59,7 @@ def run(job_id: str, storage_path: Path) -> None:
     mat = fitz.Matrix(config.PDF_RENDER_DPI / 72, config.PDF_RENDER_DPI / 72)
 
     from modules.image_preprocessor import preprocess
-    from modules.circle_detector    import detect_circles
+    from modules.circle_detector    import detect_circles, detect_colored_circles, merge_circle_lists
     from modules.callout_reader     import read_callouts
     from modules.bom_extractor      import extract_bom
     from modules.mapping_engine     import map_hotspots_to_bom
@@ -84,24 +85,60 @@ def run(job_id: str, storage_path: Path) -> None:
             assembly_index, config.PDF_RENDER_DPI, image_width, image_height, artifacts["diagram"],
         )
 
+        # ── Stage 2b: Crop to drawing area (exclude title block / footer) ─────
+        diagram_image = cv2.imread(str(artifacts["diagram"]))
+        scale = 72 / config.PDF_RENDER_DPI
+        crop_y0, crop_y1 = _detect_drawing_crop(diagram_image)
+        if crop_y0 > 0 or crop_y1 < diagram_image.shape[0]:
+            diagram_image = diagram_image[crop_y0:crop_y1, :]
+            cv2.imwrite(str(artifacts["diagram"]), diagram_image)
+            image_height = diagram_image.shape[0]
+            logger.info(
+                "Assembly %d: cropped diagram to drawing area "
+                "(removed %dpx header + %dpx footer). New: %dx%dpx",
+                assembly_index, crop_y0,
+                pix.height - crop_y1, image_width, image_height,
+            )
+
         # ── Stage 3: Image Preprocessing ─────────────────────────────────────
         emit_step(PipelineState.IMAGE_PREPROCESSING)
-        diagram_image = cv2.imread(str(artifacts["diagram"]))
         preprocessed = preprocess(diagram_image, debug=config.DEBUG)
         if config.DEBUG:
             cv2.imwrite(str(artifacts["preprocessed"]), preprocessed)
 
         # ── Stage 4: Circle Detection ─────────────────────────────────────────
         emit_step(PipelineState.CIRCLE_DETECTION)
+
+        # Pass 1: contour-based detection on binary preprocessed image.
+        # Finds dark-outlined circles (white paper + dark ring → white ring in binary).
         circles = detect_circles(preprocessed)
-        logger.info("Assembly %d: detected %d candidate circles", assembly_index, len(circles))
+        logger.info(
+            "Assembly %d: binary pass detected %d circle(s)",
+            assembly_index, len(circles),
+        )
+
+        # Pass 2: HSV connected-component detection on the original color image.
+        # Finds filled-color circles (yellow, amber, cream) that THRESH_BINARY_INV
+        # makes invisible. Shape filters (aspect ratio + compactness) reject large
+        # non-circular colored parts (axle bodies, straps, brackets).
+        colored_circles = detect_colored_circles(diagram_image)
+        if colored_circles:
+            logger.info(
+                "Assembly %d: color pass detected %d circle(s) — merging",
+                assembly_index, len(colored_circles),
+            )
+            circles = merge_circle_lists(circles, colored_circles)
+            logger.info(
+                "Assembly %d: %d circle(s) after merge + dedup",
+                assembly_index, len(circles),
+            )
+
         if config.DEBUG:
             _save_circle_debug(diagram_image, circles, artifacts)
 
         # ── Stage 5: Callout Reading ──────────────────────────────────────────
         emit_step(PipelineState.CALLOUT_READING)
-        scale = 72 / config.PDF_RENDER_DPI
-        callouts = read_callouts(diagram_image, circles, diagram_page, scale)
+        callouts = read_callouts(diagram_image, circles, diagram_page, scale, crop_y0=crop_y0)
         logger.info("Assembly %d: read %d callout numbers", assembly_index, len(callouts))
         if config.DEBUG:
             artifacts["ocr_results"].write_text(
@@ -117,6 +154,39 @@ def run(job_id: str, storage_path: Path) -> None:
             artifacts["bom_raw"].write_text(
                 json.dumps(bom_rows, indent=2), encoding="utf-8"
             )
+
+        # ── Stage D: Enhanced unresolved-circle recovery ─────────────────────
+        from modules.strategy_d_recovery import recover_unresolved_circles
+        strategy_d_recovered = recover_unresolved_circles(
+            diagram_image=diagram_image,
+            circles=circles,
+            existing_callouts=callouts,
+            bom_rows=bom_rows,
+        )
+        if strategy_d_recovered:
+            logger.info(
+                "Assembly %d: Strategy D recovered %d ref(s): %s",
+                assembly_index, len(strategy_d_recovered),
+                [r["number"] for r in strategy_d_recovered],
+            )
+            callouts = callouts + strategy_d_recovered
+
+        # ── Stage E: Gemini Vision targeted recovery ──────────────────────────
+        if LLM_ENABLED and GEMINI_API_KEY:
+            from modules.strategy_e_recovery import recover_with_gemini
+            strategy_e_recovered = recover_with_gemini(
+                diagram_image=diagram_image,
+                circles=circles,
+                existing_callouts=callouts,
+                bom_rows=bom_rows,
+            )
+            if strategy_e_recovered:
+                logger.info(
+                    "Assembly %d: Strategy E recovered %d ref(s): %s",
+                    assembly_index, len(strategy_e_recovered),
+                    [r["number"] for r in strategy_e_recovered],
+                )
+                callouts = callouts + strategy_e_recovered
 
         # ── Stage 7: Mapping ──────────────────────────────────────────────────
         emit_step(PipelineState.MAPPING)
@@ -182,6 +252,91 @@ def run(job_id: str, storage_path: Path) -> None:
 
     logger.info("Pipeline complete in %dms -> %s/result.json", duration_ms, job_dir)
     emit({"status": "done"})
+
+
+def _detect_drawing_crop(diagram_image) -> tuple[int, int]:
+    """
+    Find the drawing frame borders using horizontal projection profile.
+
+    Engineering PDFs (Bobcat style) have a visible rectangular border around
+    the drawing area. Above it: plain-text title block. Below it: footer.
+
+    Strategy:
+      1. Binarize (Otsu threshold on grayscale).
+      2. For each row, count dark pixels. A border line has a long unbroken
+         dark span — quantified as: ≥30% of image width pixels are dark AND
+         the longest unbroken dark run in that row is ≥25% of width.
+      3. Collect all qualifying row y-values.
+         top border  = topmost qualifying row below the top 5% of image
+         bottom border = bottommost qualifying row above the bottom 5%
+      4. Sanity check: cropped area must be ≥25% of original height.
+
+    Falls back to (0, image_height) — no crop — if detection fails.
+    """
+    import cv2
+    import numpy as np
+    h, w = diagram_image.shape[:2]
+
+    try:
+        gray = cv2.cvtColor(diagram_image, cv2.COLOR_BGR2GRAY)
+        # Otsu binarization: dark pixels (border lines) become 0, paper becomes 255
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        dark = (binary == 0).astype(np.uint8)  # 1 where dark
+
+        min_dark_pixels  = int(w * 0.30)   # row must have ≥30% dark pixels
+        min_run_length   = int(w * 0.25)   # longest dark run must be ≥25% of width
+
+        border_rows = []
+        for y in range(h):
+            row = dark[y]
+            if row.sum() < min_dark_pixels:
+                continue
+            # Find the longest contiguous run of dark pixels
+            max_run = 0
+            run = 0
+            for px in row:
+                if px:
+                    run += 1
+                    if run > max_run:
+                        max_run = run
+                else:
+                    run = 0
+            if max_run >= min_run_length:
+                border_rows.append(y)
+
+        logger.debug("  crop detect: %d border row(s) found", len(border_rows))
+
+        if len(border_rows) < 2:
+            logger.debug("  crop detect: <2 border rows — no crop applied")
+            return 0, h
+
+        # Top of drawing frame: topmost border row below top 5%
+        top_cands = [y for y in border_rows if y > h * 0.05]
+        # Bottom of drawing frame: bottommost border row above bottom 5%
+        bot_cands = [y for y in border_rows if y < h * 0.95]
+
+        if not top_cands or not bot_cands:
+            logger.debug("  crop detect: no usable top/bottom candidates — no crop applied")
+            return 0, h
+
+        crop_y0 = max(0, min(top_cands) - 2)
+        crop_y1 = min(h, max(bot_cands) + 2)
+
+        if crop_y0 >= crop_y1 or (crop_y1 - crop_y0) < h * 0.25:
+            logger.debug("  crop detect: implausible bounds (%d..%d) — no crop applied",
+                         crop_y0, crop_y1)
+            return 0, h
+
+        logger.info(
+            "  crop detect: drawing frame y=%d (%.0f%%) .. y=%d (%.0f%%)",
+            crop_y0, 100 * crop_y0 / h,
+            crop_y1, 100 * crop_y1 / h,
+        )
+        return crop_y0, crop_y1
+
+    except Exception as exc:
+        logger.warning("  crop detect: failed (%s) — no crop applied", exc)
+        return 0, h
 
 
 def _save_circle_debug(diagram_image, circles, artifacts):
