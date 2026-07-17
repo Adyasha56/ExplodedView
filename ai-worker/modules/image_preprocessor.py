@@ -37,7 +37,18 @@ def preprocess(image: np.ndarray, debug: bool = False) -> np.ndarray:
     logger.info("preprocess: input image %d×%d px", w, h)
 
     if image.ndim == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # Suppress vivid yellow/orange fills before grayscale so they survive
+        # THRESH_BINARY_INV. Low-saturation cream fills are handled by the
+        # separate detect_colored_circles() pass in main.py instead — masking
+        # them here at S<60 catches large coloured parts (axle bodies, brackets)
+        # which create irregular blobs that corrupt circle detection.
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        # S≥60 keeps only vivid yellow/orange; pale cream (S≈25-35) is skipped
+        # intentionally and handled by the HSV connected-component pass.
+        yellow_mask = cv2.inRange(hsv, (12, 60, 80), (45, 255, 255))
+        image_work = image.copy()
+        image_work[yellow_mask > 0] = (30, 30, 30)
+        gray = cv2.cvtColor(image_work, cv2.COLOR_BGR2GRAY)
     else:
         gray = image.copy()
 
