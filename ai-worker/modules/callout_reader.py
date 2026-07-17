@@ -80,6 +80,7 @@ def read_callouts(
     circles: list[dict],
     pdf_page,
     image_to_pdf_scale: float,
+    crop_y0: int = 0,
 ) -> list[dict]:
     """
     Returns list of { x, y, radius, number, extraction_method } for detected callouts.
@@ -90,7 +91,7 @@ def read_callouts(
 
     # Strategy A — PyMuPDF text layer
     if pdf_page is not None:
-        results = _pymupdf_full_page_scan(pdf_page)
+        results = _pymupdf_full_page_scan(pdf_page, crop_y0=crop_y0)
         if results:
             results = _deduplicate(results)
             elapsed = (time.perf_counter() - t_start) * 1000
@@ -115,12 +116,15 @@ def read_callouts(
 
 # ── Strategy A 
 
-def _pymupdf_full_page_scan(pdf_page) -> list[dict]:
-    scale        = PDF_RENDER_DPI / 72
-    page_h_px    = pdf_page.rect.height * scale
-    top_cut_px   = page_h_px * 0.10
-    bottom_cut_px = page_h_px * 0.90
-    callouts     = []
+def _pymupdf_full_page_scan(pdf_page, crop_y0: int = 0) -> list[dict]:
+    scale         = PDF_RENDER_DPI / 72
+    page_h_px     = pdf_page.rect.height * scale
+    # After cropping, valid Y in cropped-image space = 0 .. (page_h_px - crop_y0).
+    # We apply a further 10% inner-margin filter on the cropped height.
+    cropped_h_px  = page_h_px - crop_y0
+    top_cut_px    = cropped_h_px * 0.03
+    bottom_cut_px = cropped_h_px * 0.97
+    callouts      = []
     seen: set[str] = set()
 
     for block in pdf_page.get_text("dict")["blocks"]:
@@ -133,9 +137,10 @@ def _pymupdf_full_page_scan(pdf_page) -> list[dict]:
                     continue
                 bbox = span["bbox"]
                 cx = int(((bbox[0] + bbox[2]) / 2) * scale)
-                cy = int(((bbox[1] + bbox[3]) / 2) * scale)
-                if cy < top_cut_px or cy > bottom_cut_px:
-                    logger.debug("  PyMuPDF: skipping border-area '%s' at (%d,%d)", text, cx, cy)
+                # Convert from full-page pixel space to cropped-image pixel space
+                cy = int(((bbox[1] + bbox[3]) / 2) * scale) - crop_y0
+                if cy < 0 or cy < top_cut_px or cy > bottom_cut_px:
+                    logger.debug("  PyMuPDF: skipping '%s' at cy=%d (outside crop zone)", text, cy)
                     continue
                 r  = max(int(((bbox[3] - bbox[1]) / 2) * scale), 10)
                 callouts.append({"x": cx, "y": cy, "radius": r,
@@ -151,8 +156,8 @@ def _pymupdf_full_page_scan(pdf_page) -> list[dict]:
 
 def _paddleocr_scan(diagram_image: np.ndarray, circles: list[dict]) -> list[dict]:
     h, w       = diagram_image.shape[:2]
-    top_cut    = int(h * 0.10)
-    bottom_cut = int(h * 0.90)
+    top_cut    = int(h * 0.03)
+    bottom_cut = int(h * 0.97)
     engine     = _get_ocr_engine()
 
     found: dict[str, dict] = {}
@@ -284,8 +289,8 @@ def _per_circle_ocr(
         return
 
     h, w             = diagram_image.shape[:2]
-    border_cut_top   = int(h * 0.10)
-    border_cut_y     = int(h * 0.90)
+    border_cut_top   = int(h * 0.03)
+    border_cut_y     = int(h * 0.97)
     recovered        = 0
 
     for circle in circles:
