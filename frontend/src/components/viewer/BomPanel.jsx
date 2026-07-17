@@ -34,26 +34,34 @@ function BomRow({ row, hotspotNumber, selected, onClick }) {
   );
 }
 
-export default function BomPanel({ result, selectedRef, onSelectRef }) {
-  if (!result) return null;
+export default function BomPanel({ assembly, selectedRef, onSelectRef }) {
+  if (!assembly) return null;
 
-  // Build a flat list from mappings (preserving duplicate bom[] entries per hotspot)
-  const positioned = result.mappings.flatMap((m) =>
-    m.bom.map((row) => ({ ...row, hotspotNumber: m.hotspotNumber }))
-  );
+  const positioned = assembly.mappings.flatMap((m) => {
+    const seen = new Set();
+    return m.bom
+      .filter((row) => {
+        const key = `${row.refNo}|${row.partNo}|${row.description}|${row.qty}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map((row) => ({ ...row, hotspotNumber: m.hotspotNumber }));
+  });
 
-  const unpositioned = result.unpositionedBomRows;
+  const unpositioned = assembly.unpositionedBomRows ?? [];
+  const notShown = assembly.notShownBomRows ?? [];
 
   return (
-    <div className="h-full flex flex-col border-l border-gray-300 bg-white">
-      <div className="px-4 py-4 border-b border-gray-200">
+    <div className="flex flex-col bg-white">
+      <div className="px-4 py-3 border-b border-gray-200">
         <h2 className="text-sm font-semibold text-gray-800">Bill of Materials</h2>
         <p className="text-xs text-gray-400 mt-0.5">
-          {positioned.length} positioned · {unpositioned.length} unlocated
+          {assembly.totalParts} total · {unpositioned.length} unlocated · {notShown.length} not shown
         </p>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div>
         <ul className="px-2 py-2 space-y-0.5">
           {positioned.map((row, i) => (
             <BomRow
@@ -82,6 +90,30 @@ export default function BomPanel({ result, selectedRef, onSelectRef }) {
                     <span className="text-xs font-mono font-semibold shrink-0">{row.refNo}</span>
                     <span className="min-w-0 flex-1 truncate">{row.description || '—'}</span>
                     <span className="shrink-0 whitespace-nowrap rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[10px] font-medium leading-4 text-gray-500">No position</span>
+                  </div>
+                  {row.partNo && (
+                    <p className="text-xs mt-0.5 ml-6">{row.partNo}</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+
+        {notShown.length > 0 && (
+          <>
+            <div className="px-4 py-2 mt-2 border-t border-gray-100">
+              <p className="text-xs font-medium text-gray-400 uppercase tracking-wide">
+                Not shown on diagram
+              </p>
+            </div>
+            <ul className="px-2 py-1 space-y-0.5 pb-2">
+              {notShown.map((row, i) => (
+                <li key={`notshown-${row.refNo}-${i}`} className="px-3 py-2.5 text-sm text-gray-400">
+                  <div className="flex items-start gap-2">
+                    <span className="text-xs font-mono font-semibold shrink-0">{row.refNo}</span>
+                    <span className="min-w-0 flex-1 truncate">{row.description || '—'}</span>
+                    <span className="shrink-0 whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium leading-4 text-amber-600">Not shown</span>
                   </div>
                   {row.partNo && (
                     <p className="text-xs mt-0.5 ml-6">{row.partNo}</p>

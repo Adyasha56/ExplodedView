@@ -1,8 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import HotspotPin from './HotspotPin';
 
+function deduplicateRows(rows) {
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = `${row.refNo}|${row.partNo}|${row.description}|${row.qty}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function PartDetails({ mapping, scale, imageSize, onClose }) {
-  const rows = mapping.bom || [];
+  const rows = deduplicateRows(mapping.bom || []);
   const popupWidth = 272;
   const popupHeight = Math.min(220, 92 + rows.length * 62);
   const x = mapping.x * scale.x;
@@ -38,16 +48,16 @@ function PartDetails({ mapping, scale, imageSize, onClose }) {
   );
 }
 
-export default function DiagramCanvas({ result, selectedRef, onSelectRef }) {
+export default function DiagramCanvas({ assembly, selectedRef, onSelectRef }) {
   const imgRef = useRef(null);
   const [scale, setScale] = useState({ x: 1, y: 1 });
 
   function updateScale() {
     const img = imgRef.current;
-    if (!img || !result) return;
+    if (!img || !assembly) return;
     setScale({
-      x: img.clientWidth  / result.imageWidth,
-      y: img.clientHeight / result.imageHeight,
+      x: img.clientWidth  / assembly.imageWidth,
+      y: img.clientHeight / assembly.imageHeight,
     });
   }
 
@@ -55,14 +65,14 @@ export default function DiagramCanvas({ result, selectedRef, onSelectRef }) {
     updateScale();
     window.addEventListener('resize', updateScale);
     return () => window.removeEventListener('resize', updateScale);
-  }, [result]);
+  }, [assembly]);
 
-  if (!result) return null;
+  if (!assembly) return null;
 
-  const selectedMapping = result.mappings.find((mapping) => mapping.hotspotNumber === selectedRef);
+  const selectedMapping = assembly.mappings.find((mapping) => mapping.hotspotNumber === selectedRef);
   const imageSize = {
-    width: imgRef.current?.clientWidth || result.imageWidth,
-    height: imgRef.current?.clientHeight || result.imageHeight,
+    width: imgRef.current?.clientWidth || assembly.imageWidth,
+    height: imgRef.current?.clientHeight || assembly.imageHeight,
   };
 
   return (
@@ -70,7 +80,7 @@ export default function DiagramCanvas({ result, selectedRef, onSelectRef }) {
       <div className="relative inline-block">
         <img
           ref={imgRef}
-          src={result.diagramImagePath}
+          src={assembly.diagramImagePath}
           alt="Exploded view diagram"
           onLoad={updateScale}
           className="block max-w-full border border-gray-200 bg-white shadow-sm"
@@ -78,11 +88,11 @@ export default function DiagramCanvas({ result, selectedRef, onSelectRef }) {
         />
         <svg
           className="absolute inset-0 w-full h-full pointer-events-none"
-          viewBox={`0 0 ${imgRef.current?.clientWidth || result.imageWidth} ${imgRef.current?.clientHeight || result.imageHeight}`}
+          viewBox={`0 0 ${imgRef.current?.clientWidth || assembly.imageWidth} ${imgRef.current?.clientHeight || assembly.imageHeight}`}
           style={{ pointerEvents: 'none' }}
         >
           <g style={{ pointerEvents: 'all' }}>
-            {result.mappings.map((m) => (
+            {assembly.mappings.map((m) => (
               <HotspotPin
                 key={m.hotspotNumber}
                 mapping={m}

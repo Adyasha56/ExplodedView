@@ -2,8 +2,7 @@ import { useState } from 'react';
 import DropZone from '../upload/DropZone';
 import UploadBar from '../upload/UploadBar';
 import PipelineTracker from '../pipeline/PipelineTracker';
-import DiagramCanvas from '../viewer/DiagramCanvas';
-import BomPanel from '../viewer/BomPanel';
+import AssemblySection from '../viewer/AssemblySection';
 import ErrorBanner from '../shared/ErrorBanner';
 import { useUpload } from '../../hooks/useUpload';
 import { useJobPoller } from '../../hooks/useJobPoller';
@@ -12,9 +11,8 @@ import { useJobPoller } from '../../hooks/useJobPoller';
 const DOTTED_BG = `url("data:image/svg+xml,%3Csvg width='24' height='24' xmlns='http://www.w3.org/2000/svg'%3E%3Ccircle cx='1' cy='1' r='1' fill='%23cbd5e1'/%3E%3C/svg%3E")`;
 
 export default function Workspace() {
-  const [file, setFile]       = useState(null);
-  const [jobId, setJobId]     = useState(null);
-  const [selectedRef, setSelectedRef] = useState(null);
+  const [file, setFile]   = useState(null);
+  const [jobId, setJobId] = useState(null);
 
   const { upload, cancel, uploading, error: uploadError } = useUpload();
   const { job, result, error: pollError } = useJobPoller(jobId);
@@ -36,7 +34,6 @@ export default function Workspace() {
   function handleReset() {
     setFile(null);
     setJobId(null);
-    setSelectedRef(null);
   }
 
   // ── Viewer state ──────────────────────────────────────────────────────────────
@@ -56,21 +53,17 @@ export default function Workspace() {
           </button>
         </header>
 
-        <div className="flex flex-1 overflow-hidden min-w-0">
-          <main className="flex-1 overflow-hidden min-w-0">
-            <DiagramCanvas
-              result={result}
-              selectedRef={selectedRef}
-              onSelectRef={(ref) => setSelectedRef(prev => prev === ref ? null : ref)}
-            />
-          </main>
-          <aside className="w-80 lg:w-96 shrink-0 overflow-hidden">
-            <BomPanel
-              result={result}
-              selectedRef={selectedRef}
-              onSelectRef={setSelectedRef}
-            />
-          </aside>
+        <div className="flex-1 overflow-y-auto min-w-0">
+          {result.assemblies.map((assembly, i) => (
+            <div key={assembly.assemblyIndex}>
+              {i > 0 && <hr className="border-gray-300" />}
+              <AssemblySection
+                assembly={assembly}
+                showHeader={result.assemblies.length > 1}
+                totalPdfPages={result.totalPdfPages}
+              />
+            </div>
+          ))}
         </div>
       </div>
     );
