@@ -9,6 +9,7 @@ const PipelineState = require('../constants/pipeline');
 const Job = require('../models/Job.model');
 const Result = require('../models/Result.model');
 const cleanupService = require('./cleanup.service');
+const cloudinaryService = require('./cloudinary.service');
 
 // Python emits lowercase_underscore step names; normalise to PipelineState constants.
 const STEP_MAP = {
@@ -127,12 +128,21 @@ async function _handleSuccess(jobId, durationMs) {
     throw new Error(`result.json is not valid JSON: ${err.message}`);
   }
 
-  // Python writes artifact-relative paths inside each assembly; transform to Express static URLs.
+  // Upload each diagram to Cloudinary (prod) or fall back to Express static URL (local dev).
   if (Array.isArray(resultData.assemblies)) {
-    resultData.assemblies = resultData.assemblies.map((assembly) => ({
-      ...assembly,
-      diagramImagePath: '/static/' + assembly.diagramImagePath.replace(/\\/g, '/'),
-    }));
+    resultData.assemblies = await Promise.all(
+      resultData.assemblies.map(async (assembly, index) => {
+        const relativePath = assembly.diagramImagePath.replace(/\\/g, '/');
+        const localPath    = path.join(config.storage.root, relativePath);
+
+        const cloudinaryUrl = await cloudinaryService.uploadDiagram(localPath, jobId, index);
+
+        return {
+          ...assembly,
+          diagramImagePath: cloudinaryUrl || '/static/' + relativePath,
+        };
+      })
+    );
   }
 
   await Result.create({ ...resultData, jobId });
