@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import HotspotPin from './HotspotPin';
+import { staticUrl } from '../../api/static';
 
 function deduplicateRows(rows) {
   const seen = new Set();
@@ -80,7 +81,7 @@ export default function DiagramCanvas({ assembly, selectedRef, onSelectRef }) {
       <div className="relative inline-block">
         <img
           ref={imgRef}
-          src={assembly.diagramImagePath}
+          src={staticUrl(assembly.diagramImagePath)}
           alt="Exploded view diagram"
           onLoad={updateScale}
           className="block max-w-full border border-gray-200 bg-white shadow-sm"

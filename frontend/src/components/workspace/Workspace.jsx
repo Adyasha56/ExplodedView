@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { staticUrl } from '../../api/static';
 import DropZone from '../upload/DropZone';
 import UploadBar from '../upload/UploadBar';
 import PipelineTracker from '../pipeline/PipelineTracker';
@@ -87,7 +88,7 @@ export default function Workspace() {
                 >
                   <div className={`rounded-md overflow-hidden border-2 transition-colors ${active ? 'border-purple-600' : 'border-transparent hover:border-gray-300'}`}>
                     <img
-                      src={a.diagramImagePath}
+                      src={staticUrl(a.diagramImagePath)}
                       alt={`Assembly ${a.assemblyIndex + 1}`}
                       className="w-full aspect-[3/4] object-cover object-top bg-white"
                       draggable={false}
