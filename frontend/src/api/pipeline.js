@@ -1,4 +1,5 @@
-const BASE = '/api';
+const API_ORIGIN = import.meta.env.VITE_API_URL || '';
+const BASE = `${API_ORIGIN}/api`;
 
 export async function uploadPdf(file, signal) {
   const form = new FormData();
