@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: explodedview-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    plan: starter
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+      - key: MONGO_URI
+        sync: false   # set in Render dashboard: your MongoDB Atlas connection string
+      - key: STORAGE_PATH
+        value: /tmp/explodedview-storage
+      - key: PYTHON_EXECUTABLE
+        value: python3
+      - key: PYTHON_WORKER_PATH
+        value: /app/ai-worker/main.py
+      - key: GEMINI_API_KEY
+        sync: false   # set in Render dashboard
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false   # set in Render dashboard
+      - key: CLOUDINARY_API_KEY
+        sync: false   # set in Render dashboard
+      - key: CLOUDINARY_API_SECRET
+        sync: false   # set in Render dashboard
