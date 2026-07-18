@@ -12,7 +12,7 @@ WORKDIR /app
 
 # Python dependencies (heavy layer — cache it first)
 COPY ai-worker/requirements.txt ./ai-worker/requirements.txt
-RUN pip3 install --no-cache-dir -r ./ai-worker/requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r ./ai-worker/requirements.txt
 
 # Node dependencies
 COPY backend/package*.json ./backend/
