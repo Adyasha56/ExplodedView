@@ -11,9 +11,8 @@ never overrides exact matches. Returns mapping_result unchanged on any failure.
 import json
 import time
 
-import requests
-
 from config import GEMINI_API_KEY, GEMINI_MODEL, LLM_TIMEOUT_SECONDS
+from utils.gemini_http import gemini_post
 from utils.logger import get_logger
 
 logger = get_logger("llm_resolver")
@@ -83,8 +82,7 @@ def _call_gemini(mapping_result: dict, bom_rows: list[dict]) -> list[dict]:
         "generationConfig": {"responseMimeType": "application/json"},
     }
 
-    response = requests.post(url, json=payload, timeout=LLM_TIMEOUT_SECONDS)
-    response.raise_for_status()
+    response = gemini_post(url, payload, timeout=max(LLM_TIMEOUT_SECONDS, 60), logger=logger)
 
     data = response.json()
     raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()

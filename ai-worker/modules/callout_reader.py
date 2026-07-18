@@ -480,5 +480,7 @@ def _get_ocr_engine():
             lang=OCR_LANGUAGE,
             det_limit_side_len=3600,
             det_db_thresh=0.2,
+            cpu_threads=4,
+            show_log=False,
         )
     return _ocr_engine

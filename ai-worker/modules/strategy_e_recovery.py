@@ -27,9 +27,9 @@ import time
 
 import cv2
 import numpy as np
-import requests
 
 from config import GEMINI_API_KEY, GEMINI_MODEL, LLM_TIMEOUT_SECONDS
+from utils.gemini_http import gemini_post
 from utils.logger import get_logger
 
 logger = get_logger("strategy_e")
@@ -148,8 +148,7 @@ def _call_gemini(
     }
 
     logger.info("Strategy E: sending multimodal request to Gemini (%s)", GEMINI_MODEL)
-    response = requests.post(url, json=payload, timeout=max(LLM_TIMEOUT_SECONDS, 60))
-    response.raise_for_status()
+    response = gemini_post(url, payload, timeout=max(LLM_TIMEOUT_SECONDS, 60), logger=logger)
 
     data     = response.json()
     raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()

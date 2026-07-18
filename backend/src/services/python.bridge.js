@@ -74,31 +74,49 @@ exports.runPipeline = (jobId) => {
       if (msg.status === 'done') {
         const durationMs = Date.now() - startTime;
         logger.info(`[${jobId}] Pipeline complete in ${durationMs}ms`);
-        await _handleSuccess(jobId, durationMs).then(resolve).catch(reject);
+        settle(() => _handleSuccess(jobId, durationMs).then(resolve).catch(reject));
       }
 
       if (msg.status === 'error') {
         logger.error(`[${jobId}] Pipeline error: ${msg.message}`);
         await _handleFailure(jobId, msg.message || 'Unknown pipeline error').catch(() => {});
-        reject(new Error(msg.message));
+        settle(() => reject(new Error(msg.message)));
       }
     });
 
     // ── stderr: Python tracebacks and logging output ─────────────────────────
+    // Collect the last 20 lines for diagnostics on unexpected exits.
+    const stderrTail = [];
     pythonProcess.stderr.on('data', (data) => {
-      // Python logger writes to stdout; stderr usually means an unhandled crash.
-      logger.warn(`[${jobId}] Python stderr: ${data.toString().trim()}`);
+      const text = data.toString().trim();
+      logger.warn(`[${jobId}] Python stderr: ${text}`);
+      const lines = text.split('\n').filter((l) => l.trim());
+      stderrTail.push(...lines);
+      if (stderrTail.length > 20) stderrTail.splice(0, stderrTail.length - 20);
     });
 
     // ── Process exit ──────────────────────────────────────────────────────────
-    pythonProcess.on('close', async (code) => {
-      if (code !== 0) {
-        // Process crashed without emitting a {"status":"error"} line.
-        const msg = `Python process exited with code ${code}`;
+    let settled = false;
+    const settle = (fn) => { if (!settled) { settled = true; fn(); } };
+
+    pythonProcess.on('close', async (code, signal) => {
+      if (signal) {
+        // Killed by OS — SIGKILL almost always means OOM on Render.
+        const oomHint = signal === 'SIGKILL' ? ' — likely OOM kill on Render' : '';
+        const tail    = stderrTail.slice(-5).join(' | ') || '(none)';
+        const msg     = `Python worker killed by signal ${signal}${oomHint}. stderr tail: ${tail}`;
         logger.error(`[${jobId}] ${msg}`);
-        await _handleFailure(jobId, msg).catch(() => {});
-        reject(new Error(msg));
+        await _handleFailure(jobId, `Killed by signal ${signal}${oomHint}`).catch(() => {});
+        settle(() => reject(new Error(msg)));
+      } else if (code !== 0) {
+        // Crashed without emitting a {"status":"error"} JSON line.
+        const tail = stderrTail.slice(-5).join(' | ') || '(none)';
+        const msg  = `Python process exited with code ${code}. stderr tail: ${tail}`;
+        logger.error(`[${jobId}] ${msg}`);
+        await _handleFailure(jobId, `Exited with code ${code}`).catch(() => {});
+        settle(() => reject(new Error(msg)));
       }
+      // code === 0, signal === null → normal exit; 'done' line already settled the promise.
     });
 
     pythonProcess.on('error', async (err) => {
@@ -106,7 +124,7 @@ exports.runPipeline = (jobId) => {
       const msg = `Failed to spawn Python: ${err.message}`;
       logger.error(`[${jobId}] ${msg}`);
       await _handleFailure(jobId, msg).catch(() => {});
-      reject(err);
+      settle(() => reject(err));
     });
   });
 };

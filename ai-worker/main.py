@@ -15,6 +15,7 @@ Exit codes:
 """
 
 import argparse
+import gc
 import json
 import sys
 import time
@@ -99,6 +100,7 @@ def run(job_id: str, storage_path: Path) -> None:
                 assembly_index, crop_y0,
                 pix.height - crop_y1, image_width, image_height,
             )
+        del pix
 
         # ── Stage 3: Image Preprocessing ─────────────────────────────────────
         emit_step(PipelineState.IMAGE_PREPROCESSING)
@@ -116,6 +118,8 @@ def run(job_id: str, storage_path: Path) -> None:
             "Assembly %d: binary pass detected %d circle(s)",
             assembly_index, len(circles),
         )
+        del preprocessed
+        gc.collect()
 
         # Pass 2: HSV connected-component detection on the original color image.
         # Finds filled-color circles (yellow, amber, cream) that THRESH_BINARY_INV
@@ -187,6 +191,10 @@ def run(job_id: str, storage_path: Path) -> None:
                     [r["number"] for r in strategy_e_recovered],
                 )
                 callouts = callouts + strategy_e_recovered
+
+        # diagram_image is no longer needed — release before mapping to free RAM
+        del diagram_image
+        gc.collect()
 
         # ── Stage 7: Mapping ──────────────────────────────────────────────────
         emit_step(PipelineState.MAPPING)
