@@ -1,5 +1,6 @@
 require('dotenv').config();
 const path = require('path');
+const fs = require('fs');
 
 const config = {
   server: {
@@ -38,5 +39,9 @@ const config = {
     allowedExtensions: ['.pdf'],
   },
 };
+
+// Ensure storage dirs exist at startup (important when STORAGE_PATH points to /tmp)
+fs.mkdirSync(config.storage.uploads, { recursive: true });
+fs.mkdirSync(config.storage.outputs, { recursive: true });
 
 module.exports = config;
