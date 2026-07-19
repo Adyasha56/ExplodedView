@@ -74,7 +74,17 @@ exports.runPipeline = (jobId) => {
       if (msg.status === 'done') {
         const durationMs = Date.now() - startTime;
         logger.info(`[${jobId}] Pipeline complete in ${durationMs}ms`);
-        settle(() => _handleSuccess(jobId, durationMs).then(resolve).catch(reject));
+        settle(() =>
+          _handleSuccess(jobId, durationMs)
+            .then(resolve)
+            .catch(async (err) => {
+              // Post-pipeline failure (result.json missing, MongoDB error, etc.)
+              // Mark job failed so it is never stuck in processing.
+              logger.error(`[${jobId}] Post-pipeline failure: ${err.message}`);
+              await _handleFailure(jobId, err.message).catch(() => {});
+              reject(err);
+            })
+        );
       }
 
       if (msg.status === 'error') {

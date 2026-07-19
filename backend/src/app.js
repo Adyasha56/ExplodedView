@@ -55,7 +55,7 @@ app.use((err, _req, res, _next) => {
 mongoose
   .connect(config.db.uri)
   .then(() => {
-    logger.info(`MongoDB connected → ${config.db.uri}`);
+    logger.info(`MongoDB connected`);
     app.listen(config.server.port, () => {
       logger.info(`Server listening on port ${config.server.port} [${config.server.nodeEnv}]`);
       logger.info(`Storage root → ${config.storage.root}`);
