@@ -15,9 +15,9 @@ COPY ai-worker/requirements.txt ./ai-worker/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r ./ai-worker/requirements.txt
 
 # Pre-download PaddleOCR models at build time so they are baked into the image.
-# Build runs as root; runtime on Render also runs as root → /root/.paddleocr is the
-# same path at both stages. Without this, every cold start re-downloads ~16 MB of
-# model tars before the first OCR call, adding latency and risking OOM during init.
+# Build and runtime both run as root → /root/.paddleocr is the same path at both
+# stages. Without this, every cold start re-downloads ~16 MB of model tars before
+# the first OCR call, adding latency and risking OOM during init.
 RUN python3 -c "\
 from paddleocr import PaddleOCR; \
 PaddleOCR(lang='en', use_angle_cls=False, show_log=False, cpu_threads=4); \

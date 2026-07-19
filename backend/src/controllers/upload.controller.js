@@ -11,8 +11,9 @@ const logger = require('../utils/logger');
  *   1. multer middleware (upload.middleware.js) has already saved the file to
  *      storage/uploads/<jobId>.pdf and attached req.jobId + req.file.
  *   2. Create Job document in MongoDB.
- *   3. Fire-and-forget: start the Python pipeline asynchronously.
- *   4. Immediately return { jobId, status } — client polls for progress.
+ *   3. Await the Python pipeline — HTTP request stays open until pipeline completes.
+ *      This guarantees CPU allocation on Cloud Run for the full pipeline duration.
+ *   4. Return { jobId, status } when done, or an error response if the pipeline fails.
  *
  * The controller is intentionally thin. File handling is multer's job.
  * Pipeline orchestration is python.bridge's job.
@@ -33,7 +34,7 @@ exports.handleUpload = async (req, res, next) => {
     logger.info(`[${jobId}] Upload received — file: "${originalname}", size: ${(size / 1024).toFixed(1)} KB`);
 
     // Create the Job record. Status starts at "pending"; bridge will update it.
-    const job = await Job.create({
+    await Job.create({
       jobId,
       filename: originalname,
       fileSizeBytes: size,
@@ -43,19 +44,28 @@ exports.handleUpload = async (req, res, next) => {
 
     logger.info(`[${jobId}] Job created in MongoDB`);
 
-    // Fire-and-forget — do NOT await. The client will poll /api/jobs/:jobId.
-    // Any errors inside runPipeline are caught there and written to the Job doc.
-    pythonBridge.runPipeline(jobId).catch((err) => {
-      logger.error(`[${jobId}] Unhandled pipeline error: ${err.message}`);
-    });
+    // Await the pipeline — keeps the HTTP request open so Cloud Run allocates
+    // CPU for the full duration. On failure, python.bridge has already marked
+    // the job as 'error' in MongoDB before rejecting, so it is never stuck.
+    await pythonBridge.runPipeline(jobId);
 
-    return res.status(202).json({
+    return res.status(200).json({
       jobId,
-      status: job.status,
-      message: 'File accepted. Poll /api/jobs/:jobId for progress.',
+      status: 'done',
     });
 
   } catch (err) {
+    // Pipeline errors are already written to the Job document by python.bridge.
+    // Return an error response so the client knows the upload failed.
+    const jobId = req.jobId;
+    if (jobId) {
+      logger.error(`[${jobId}] Pipeline failed — returning error response: ${err.message}`);
+      return res.status(500).json({
+        jobId,
+        status: 'error',
+        error: err.message || 'Pipeline failed.',
+      });
+    }
     next(err);
   }
 };

@@ -56,7 +56,7 @@ mongoose
   .connect(config.db.uri)
   .then(() => {
     logger.info(`MongoDB connected`);
-    app.listen(config.server.port, () => {
+    app.listen(config.server.port, '0.0.0.0', () => {
       logger.info(`Server listening on port ${config.server.port} [${config.server.nodeEnv}]`);
       logger.info(`Storage root → ${config.storage.root}`);
       logger.info('Routes mounted:');

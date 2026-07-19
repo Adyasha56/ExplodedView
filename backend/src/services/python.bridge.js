@@ -111,8 +111,8 @@ exports.runPipeline = (jobId) => {
 
     pythonProcess.on('close', async (code, signal) => {
       if (signal) {
-        // Killed by OS — SIGKILL almost always means OOM on Render.
-        const oomHint = signal === 'SIGKILL' ? ' — likely OOM kill on Render' : '';
+        // Killed by OS — SIGKILL typically means OOM.
+        const oomHint = signal === 'SIGKILL' ? ' — likely OOM kill' : '';
         const tail    = stderrTail.slice(-5).join(' | ') || '(none)';
         const msg     = `Python worker killed by signal ${signal}${oomHint}. stderr tail: ${tail}`;
         logger.error(`[${jobId}] ${msg}`);
