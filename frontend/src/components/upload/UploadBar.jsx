@@ -27,7 +27,7 @@ export default function UploadBar({ file, uploading, onUpload, onClear }) {
           <div className="h-1 flex-1 bg-gray-100 rounded overflow-hidden">
             <div className="h-full bg-purple-600 animate-pulse w-2/3" />
           </div>
-          <span className="text-xs text-gray-400 shrink-0">Uploading…</span>
+          <span className="text-xs text-gray-400 shrink-0">Analysing PDF…</span>
         </div>
       ) : (
         <button
