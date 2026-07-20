@@ -114,9 +114,10 @@ def run(job_id: str, storage_path: Path) -> None:
         # Pass 1: contour-based detection on binary preprocessed image.
         # Finds dark-outlined circles (white paper + dark ring → white ring in binary).
         circles = detect_circles(preprocessed)
+        _n_standard = len(circles)
         logger.info(
             "Assembly %d: binary pass detected %d circle(s)",
-            assembly_index, len(circles),
+            assembly_index, _n_standard,
         )
         del preprocessed
         gc.collect()
@@ -126,16 +127,21 @@ def run(job_id: str, storage_path: Path) -> None:
         # makes invisible. Shape filters (aspect ratio + compactness) reject large
         # non-circular colored parts (axle bodies, straps, brackets).
         colored_circles = detect_colored_circles(diagram_image)
+        _n_colored = len(colored_circles)
         if colored_circles:
             logger.info(
                 "Assembly %d: color pass detected %d circle(s) — merging",
-                assembly_index, len(colored_circles),
+                assembly_index, _n_colored,
             )
             circles = merge_circle_lists(circles, colored_circles)
             logger.info(
                 "Assembly %d: %d circle(s) after merge + dedup",
                 assembly_index, len(circles),
             )
+        logger.info(
+            "[CIRCLE] assembly=%d standard=%d colored=%d merged=%d",
+            assembly_index, _n_standard, _n_colored, len(circles),
+        )
 
         if config.DEBUG:
             _save_circle_debug(diagram_image, circles, artifacts)
@@ -143,11 +149,13 @@ def run(job_id: str, storage_path: Path) -> None:
         # ── Stage 5: Callout Reading ──────────────────────────────────────────
         emit_step(PipelineState.CALLOUT_READING)
         callouts = read_callouts(diagram_image, circles, diagram_page, scale, crop_y0=crop_y0)
+        _n_raw_ocr = len(callouts)
 
         # Drop OCR callouts that land inside a colored circle — OCR misclassifies
         # digits on yellow-fill circles (e.g. reads "2" as "7"). Strategy E
         # (Gemini) handles colored circles correctly when LLM is enabled; without
         # LLM they surface as unpositioned, which is honest and safe.
+        _n_dropped_colored = 0
         if colored_circles:
             import math as _math
             def _in_colored_circle(callout):
@@ -158,14 +166,18 @@ def run(job_id: str, storage_path: Path) -> None:
                 return False
             before = len(callouts)
             callouts = [c for c in callouts if not _in_colored_circle(c)]
-            dropped = before - len(callouts)
-            if dropped:
+            _n_dropped_colored = before - len(callouts)
+            if _n_dropped_colored:
                 logger.info(
                     "Assembly %d: dropped %d OCR callout(s) inside colored circles — left for Strategy E",
-                    assembly_index, dropped,
+                    assembly_index, _n_dropped_colored,
                 )
 
         logger.info("Assembly %d: read %d callout numbers", assembly_index, len(callouts))
+        logger.info(
+            "[CALLOUT] assembly=%d input_circles=%d raw_ocr=%d dropped_colored=%d final=%d",
+            assembly_index, len(circles), _n_raw_ocr, _n_dropped_colored, len(callouts),
+        )
         if config.DEBUG:
             artifacts["ocr_results"].write_text(
                 json.dumps(callouts, indent=2), encoding="utf-8"
@@ -196,9 +208,14 @@ def run(job_id: str, storage_path: Path) -> None:
                 [r["number"] for r in strategy_d_recovered],
             )
             callouts = callouts + strategy_d_recovered
+        logger.info(
+            "[STRATEGY_D] assembly=%d attempted=%d recovered=%d total_after=%d",
+            assembly_index, len(circles), len(strategy_d_recovered), len(callouts),
+        )
 
         # ── Stage E: Gemini Vision targeted recovery ──────────────────────────
         if LLM_ENABLED and GEMINI_API_KEY:
+            _e_before = len(callouts)
             from modules.strategy_e_recovery import recover_with_gemini
             strategy_e_recovered = recover_with_gemini(
                 diagram_image=diagram_image,
@@ -213,6 +230,17 @@ def run(job_id: str, storage_path: Path) -> None:
                     [r["number"] for r in strategy_e_recovered],
                 )
                 callouts = callouts + strategy_e_recovered
+            logger.info(
+                "[STRATEGY_E] assembly=%d attempted=True recovered=%d total_after=%d",
+                assembly_index, len(strategy_e_recovered), len(callouts),
+            )
+        else:
+            logger.info(
+                "[STRATEGY_E] assembly=%d attempted=False recovered=0 reason=LLM_DISABLED",
+                assembly_index,
+            )
+
+        logger.info("[HOTSPOTS] assembly=%d final=%d", assembly_index, len(callouts))
 
         # diagram_image is no longer needed — release before mapping to free RAM
         del diagram_image
