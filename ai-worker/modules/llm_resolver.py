@@ -79,14 +79,14 @@ def _call_gemini(mapping_result: dict, bom_rows: list[dict]) -> list[dict]:
     url = _GEMINI_URL.format(model=GEMINI_MODEL, key=GEMINI_API_KEY)
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json"},
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
     }
 
     response = gemini_post(url, payload, timeout=max(LLM_TIMEOUT_SECONDS, 60), logger=logger)
 
     data = response.json()
     raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    parsed = json.loads(raw_text)
+    parsed, _ = json.JSONDecoder().raw_decode(raw_text)
 
     return _extract_validations(parsed)
 

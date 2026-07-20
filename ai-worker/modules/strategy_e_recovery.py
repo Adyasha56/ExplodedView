@@ -144,7 +144,7 @@ def _call_gemini(
                 {"text": prompt},
             ]
         }],
-        "generationConfig": {"responseMimeType": "application/json"},
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
     }
 
     logger.info("Strategy E: sending multimodal request to Gemini (%s)", GEMINI_MODEL)

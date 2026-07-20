@@ -1,12 +1,10 @@
 """
 Gemini REST API HTTP helper.
 
-Wraps requests.post with up to 2 retries on 429 (rate limit), using
-exponential backoff. Both callers (strategy_e_recovery, llm_resolver)
-share this so retry logic lives in one place.
-
-Free-tier quotas produce 429s under sustained load; a simple backoff
-recovers the vast majority without user-visible failures.
+Wraps requests.post with up to 2 retries on 429 (rate limit) and 503
+(transient server unavailable), using exponential backoff. Both callers
+(strategy_e_recovery, llm_resolver) share this so retry logic lives in
+one place.
 """
 
 import time
@@ -38,18 +36,18 @@ def gemini_post(
         attempt += 1
         response = requests.post(url, json=payload, timeout=timeout)
 
-        if response.status_code != 429:
+        if response.status_code not in (429, 503):
             response.raise_for_status()
             return response
 
         try:
             delay = next(delay_iter)
         except StopIteration:
-            # All retries exhausted — raise the 429 so callers can log it
+            # All retries exhausted — raise so callers can log it
             response.raise_for_status()
 
         logger.warning(
-            "Gemini 429 Too Many Requests (attempt %d) — retrying in %ds",
-            attempt, delay,
+            "Gemini %d (attempt %d) — retrying in %ds",
+            response.status_code, attempt, delay,
         )
         time.sleep(delay)

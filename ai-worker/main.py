@@ -143,6 +143,28 @@ def run(job_id: str, storage_path: Path) -> None:
         # ── Stage 5: Callout Reading ──────────────────────────────────────────
         emit_step(PipelineState.CALLOUT_READING)
         callouts = read_callouts(diagram_image, circles, diagram_page, scale, crop_y0=crop_y0)
+
+        # Drop OCR callouts that land inside a colored circle — OCR misclassifies
+        # digits on yellow-fill circles (e.g. reads "2" as "7"). Strategy E
+        # (Gemini) handles colored circles correctly when LLM is enabled; without
+        # LLM they surface as unpositioned, which is honest and safe.
+        if colored_circles:
+            import math as _math
+            def _in_colored_circle(callout):
+                for cc in colored_circles:
+                    dist = _math.sqrt((callout["x"] - cc["x"]) ** 2 + (callout["y"] - cc["y"]) ** 2)
+                    if dist <= cc["radius"]:
+                        return True
+                return False
+            before = len(callouts)
+            callouts = [c for c in callouts if not _in_colored_circle(c)]
+            dropped = before - len(callouts)
+            if dropped:
+                logger.info(
+                    "Assembly %d: dropped %d OCR callout(s) inside colored circles — left for Strategy E",
+                    assembly_index, dropped,
+                )
+
         logger.info("Assembly %d: read %d callout numbers", assembly_index, len(callouts))
         if config.DEBUG:
             artifacts["ocr_results"].write_text(
