@@ -14,7 +14,7 @@ _formatter = logging.Formatter(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-_handler = logging.StreamHandler(sys.stdout)
+_handler = logging.StreamHandler(sys.stderr)
 _handler.setFormatter(_formatter)
 
 # Root logger for the entire pipeline
