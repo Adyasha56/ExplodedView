@@ -156,6 +156,7 @@ def run(job_id: str, storage_path: Path) -> None:
         # (Gemini) handles colored circles correctly when LLM is enabled; without
         # LLM they surface as unpositioned, which is honest and safe.
         _n_dropped_colored = 0
+        colored_ocr_fallbacks: dict[str, dict] = {}
         if colored_circles:
             import math as _math
             def _in_colored_circle(callout):
@@ -164,9 +165,15 @@ def run(job_id: str, storage_path: Path) -> None:
                     if dist <= cc["radius"]:
                         return True
                 return False
-            before = len(callouts)
-            callouts = [c for c in callouts if not _in_colored_circle(c)]
-            _n_dropped_colored = before - len(callouts)
+            kept = []
+            for c in callouts:
+                if _in_colored_circle(c):
+                    ref = str(c["number"]).strip().lstrip("0") or "0"
+                    colored_ocr_fallbacks[ref] = c
+                else:
+                    kept.append(c)
+            callouts = kept
+            _n_dropped_colored = len(colored_ocr_fallbacks)
             if _n_dropped_colored:
                 logger.info(
                     "Assembly %d: dropped %d OCR callout(s) inside colored circles — left for Strategy E",
@@ -214,6 +221,7 @@ def run(job_id: str, storage_path: Path) -> None:
         )
 
         # ── Stage E: Gemini Vision targeted recovery ──────────────────────────
+        _strategy_e_recovered_refs: set[str] = set()
         if LLM_ENABLED and GEMINI_API_KEY:
             _e_before = len(callouts)
             from modules.strategy_e_recovery import recover_with_gemini
@@ -224,6 +232,10 @@ def run(job_id: str, storage_path: Path) -> None:
                 bom_rows=bom_rows,
             )
             if strategy_e_recovered:
+                _strategy_e_recovered_refs = {
+                    str(r["number"]).strip().lstrip("0") or "0"
+                    for r in strategy_e_recovered
+                }
                 logger.info(
                     "Assembly %d: Strategy E recovered %d ref(s): %s",
                     assembly_index, len(strategy_e_recovered),
@@ -239,6 +251,22 @@ def run(job_id: str, storage_path: Path) -> None:
                 "[STRATEGY_E] assembly=%d attempted=False recovered=0 reason=LLM_DISABLED",
                 assembly_index,
             )
+
+        # Restore colored OCR fallbacks for refs Strategy E did not resolve.
+        # Only restores refs present in the BOM — OCR false positives are discarded.
+        if colored_ocr_fallbacks:
+            _norm = lambda r: str(r).strip().lstrip("0") or "0"
+            _bom_refs = {_norm(r["ref_no"]) for r in bom_rows}
+            _restored = [
+                fb for ref, fb in colored_ocr_fallbacks.items()
+                if ref not in _strategy_e_recovered_refs and ref in _bom_refs
+            ]
+            if _restored:
+                callouts = callouts + _restored
+                logger.info(
+                    "Assembly %d: restored %d colored OCR fallback(s) Strategy E did not resolve: %s",
+                    assembly_index, len(_restored), [r["number"] for r in _restored],
+                )
 
         logger.info("[HOTSPOTS] assembly=%d final=%d", assembly_index, len(callouts))
 
@@ -265,16 +293,38 @@ def run(job_id: str, storage_path: Path) -> None:
         # ── Stage 8 (optional): LLM Validation ───────────────────────────────
         _has_fuzzy = any(m["confidence"] < 1.0 for m in mapping_result["mappings"])
         if config.LLM_ENABLED and (mapping_result["unmapped_hotspots"] or _has_fuzzy):
-            emit_step(PipelineState.LLM_VALIDATION)
-            from modules.llm_resolver import resolve_with_llm
-            mapping_result = resolve_with_llm(
-                mapping_result=mapping_result,
-                bom_rows=bom_rows,
-            )
-            logger.info(
-                "Assembly %d: LLM validation — %d decision(s)",
-                assembly_index, len(mapping_result["llm_validations"]),
-            )
+            # Exclude unmapped hotspots whose ref doesn't exist in the BOM.
+            # These are OCR false positives that Gemini cannot resolve.
+            _norm_r = lambda r: str(r).strip().lstrip("0") or "0"
+            _bom_ref_set = {_norm_r(r["ref_no"]) for r in bom_rows}
+            _all_unmapped     = mapping_result["unmapped_hotspots"]
+            _valid_unmapped   = [h for h in _all_unmapped if _norm_r(h["number"]) in _bom_ref_set]
+            _invalid_unmapped = [h for h in _all_unmapped if _norm_r(h["number"]) not in _bom_ref_set]
+            if _invalid_unmapped:
+                logger.info(
+                    "Assembly %d: excluding %d unmapped ref(s) not in BOM from llm_resolver: %s",
+                    assembly_index, len(_invalid_unmapped),
+                    [h["number"] for h in _invalid_unmapped],
+                )
+            if _valid_unmapped or _has_fuzzy:
+                emit_step(PipelineState.LLM_VALIDATION)
+                from modules.llm_resolver import resolve_with_llm
+                _resolver_input = {**mapping_result, "unmapped_hotspots": _valid_unmapped}
+                mapping_result = resolve_with_llm(
+                    mapping_result=_resolver_input,
+                    bom_rows=bom_rows,
+                )
+                # Restore invalid refs so they remain visible in the final result
+                mapping_result = {
+                    **mapping_result,
+                    "unmapped_hotspots": mapping_result["unmapped_hotspots"] + _invalid_unmapped,
+                }
+                logger.info(
+                    "Assembly %d: LLM validation — %d decision(s)",
+                    assembly_index, len(mapping_result["llm_validations"]),
+                )
+            else:
+                mapping_result = {**mapping_result, "llm_validations": [], "unmapped_hotspots": _all_unmapped}
         else:
             mapping_result["llm_validations"] = []
 

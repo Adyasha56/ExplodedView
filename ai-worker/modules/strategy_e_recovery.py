@@ -23,6 +23,7 @@ pipeline is unaffected.
 import base64
 import json
 import math
+import re
 import time
 
 import cv2
@@ -154,7 +155,25 @@ def _call_gemini(
     raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
     logger.debug("Strategy E: Gemini raw response:\n%s", raw_text)
 
-    parsed = json.loads(raw_text)
+    # Strip markdown code fences Gemini occasionally wraps responses in
+    cleaned = raw_text
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        cleaned = cleaned.strip()
+
+    try:
+        parsed, _ = json.JSONDecoder().raw_decode(cleaned)
+    except json.JSONDecodeError as e:
+        pos = e.pos
+        win_s = max(0, pos - 300)
+        win_e = min(len(cleaned), pos + 300)
+        logger.warning(
+            "Strategy E: JSON parse failed at pos=%d (response_len=%d): %s — "
+            "context [%d:%d]: %r",
+            pos, len(cleaned), e.msg, win_s, win_e, cleaned[win_s:win_e],
+        )
+        raise
     return _extract_recoveries(parsed, unresolved, missing_refs)
 
 
