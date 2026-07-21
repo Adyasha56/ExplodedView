@@ -148,7 +148,7 @@ def _call_gemini(
     }
 
     logger.info("Strategy E: sending multimodal request to Gemini (%s)", GEMINI_MODEL)
-    response = gemini_post(url, payload, timeout=max(LLM_TIMEOUT_SECONDS, 60), logger=logger)
+    response = gemini_post(url, payload, timeout=max(LLM_TIMEOUT_SECONDS, 120), logger=logger)
 
     data     = response.json()
     raw_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -329,7 +329,23 @@ def _normalise(ref) -> str:
 
 
 def _encode_image(image: np.ndarray) -> str:
-    """Encode numpy image array to base64 PNG string for Gemini inline_data."""
+    """Encode numpy image array to base64 PNG string for Gemini inline_data.
+
+    Resizes to max 1500px on the longest side before encoding. Callout circle
+    numbers remain legible at this resolution and the smaller payload reduces
+    network transfer time, avoiding read timeouts on hosted deployments.
+    """
+    h, w = image.shape[:2]
+    max_dim = 1500
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        logger.info(
+            "_encode_image: resized %dx%d -> %dx%d for Gemini payload",
+            w, h, new_w, new_h,
+        )
     success, buf = cv2.imencode(".png", image)
     if not success:
         raise RuntimeError("Failed to encode diagram image as PNG")

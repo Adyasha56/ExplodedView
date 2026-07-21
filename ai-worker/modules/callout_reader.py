@@ -33,7 +33,9 @@ Undetected callouts produce no entry. They surface as unpositionedBomRows.
 """
 
 import math
+import os
 import re
+import sys
 import time
 
 import cv2
@@ -47,6 +49,15 @@ from config import (
 from utils.logger import get_logger
 
 logger = get_logger("callout_reader")
+
+
+def _mem_mb() -> float:
+    """Return current process RSS in MB, or -1 if psutil is unavailable."""
+    try:
+        import psutil
+        return psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+    except Exception:
+        return -1.0
 
 _DIGIT_RE = re.compile(r"^\d{1,2}$")
 
@@ -170,15 +181,49 @@ def _paddleocr_scan(diagram_image: np.ndarray, circles: list[dict]) -> list[dict
     ends[-1] = h
 
     for i, (y0, y1) in enumerate(zip(starts, ends)):
-        tile       = diagram_image[y0:y1, :]
-        ocr_result = engine.ocr(tile, cls=OCR_USE_ANGLE_CLS)
-        if not ocr_result or not ocr_result[0]:
+        tile = diagram_image[y0:y1, :]
+        tile_h_px, tile_w_px = tile.shape[:2]
+        mem_before = _mem_mb()
+        logger.info(
+            "  [OCR-DIAG] tile %d/%d rows=%d-%d shape=%dx%d mem_before=%.0fMB",
+            i + 1, len(starts), y0, y1, tile_w_px, tile_h_px, mem_before,
+        )
+
+        try:
+            ocr_result = engine.ocr(tile, cls=OCR_USE_ANGLE_CLS)
+        except Exception as exc:
+            logger.warning(
+                "  [OCR-DIAG] tile %d: ocr() raised %s: %s",
+                i + 1, type(exc).__name__, exc,
+            )
             continue
 
-        logger.info("  Pass 1 tile %d/%d rows %d–%d: %d box(es)",
-                    i + 1, len(starts), y0, y1, len(ocr_result[0]))
+        mem_after = _mem_mb()
 
-        for line in ocr_result[0]:
+        if ocr_result is None:
+            logger.info(
+                "  [OCR-DIAG] tile %d: returned None  mem_after=%.0fMB",
+                i + 1, mem_after,
+            )
+            continue
+        if not ocr_result or not ocr_result[0]:
+            logger.info(
+                "  [OCR-DIAG] tile %d: returned %r (empty)  mem_after=%.0fMB",
+                i + 1, ocr_result, mem_after,
+            )
+            continue
+
+        raw_boxes = ocr_result[0]
+        samples = [(line[1][0], round(line[1][1], 3)) for line in raw_boxes[:8]]
+        logger.info(
+            "  [OCR-DIAG] tile %d: %d raw box(es)  mem_after=%.0fMB  sample=%s",
+            i + 1, len(raw_boxes), mem_after, samples,
+        )
+        logger.info("  Pass 1 tile %d/%d rows %d–%d: %d box(es)",
+                    i + 1, len(starts), y0, y1, len(raw_boxes))
+
+        digits_accepted = 0
+        for line in raw_boxes:
             bbox_pts = line[0]
             text     = _clean(line[1][0])
             score    = line[1][1]
@@ -195,6 +240,12 @@ def _paddleocr_scan(diagram_image: np.ndarray, circles: list[dict]) -> list[dict
             bh = max(p[1] for p in bbox_pts) - min(p[1] for p in bbox_pts)
             r  = max(int(bh / 2), 10)
             _keep_best(found, text, cx, cy, r, score, "paddleocr")
+            digits_accepted += 1
+
+        logger.info(
+            "  [OCR-DIAG] tile %d: %d/%d box(es) passed digit+score+zone filter",
+            i + 1, digits_accepted, len(raw_boxes),
+        )
 
     logger.info("  Pass 1 complete: %d callout(s): %s",
                 len(found), sorted(int(k) for k in found))
@@ -317,9 +368,34 @@ def _per_circle_ocr(
                               (int(cw * scale_up), int(ch * scale_up)),
                               interpolation=cv2.INTER_CUBIC)
 
-        ocr_result = engine.ocr(crop, cls=OCR_USE_ANGLE_CLS)
-        if not ocr_result or not ocr_result[0]:
+        try:
+            ocr_result = engine.ocr(crop, cls=OCR_USE_ANGLE_CLS)
+        except Exception as exc:
+            logger.warning(
+                "  [OCR-DIAG] StratC circle (%d,%d) r=%d: ocr() raised %s: %s",
+                cx, cy, r, type(exc).__name__, exc,
+            )
             continue
+
+        if ocr_result is None:
+            logger.info(
+                "  [OCR-DIAG] StratC circle (%d,%d) r=%d crop=%dx%d scaled=%dx%d: returned None",
+                cx, cy, r, cw, ch, int(cw * scale_up), int(ch * scale_up),
+            )
+            continue
+        if not ocr_result or not ocr_result[0]:
+            logger.info(
+                "  [OCR-DIAG] StratC circle (%d,%d) r=%d crop=%dx%d scaled=%dx%d: returned empty",
+                cx, cy, r, cw, ch, int(cw * scale_up), int(ch * scale_up),
+            )
+            continue
+
+        raw_c_boxes = ocr_result[0]
+        logger.info(
+            "  [OCR-DIAG] StratC circle (%d,%d) r=%d: %d raw box(es) %s",
+            cx, cy, r, len(raw_c_boxes),
+            [(line[1][0], round(line[1][1], 3)) for line in raw_c_boxes[:4]],
+        )
 
         # Among all digit hits in this crop, pick the one closest to the crop centre.
         # Dividing by scale_up converts back to original-resolution coordinates.
@@ -330,7 +406,7 @@ def _per_circle_ocr(
         best_score = 0.0
         best_dist  = float("inf")
 
-        for line in ocr_result[0]:
+        for line in raw_c_boxes:
             bbox_pts = line[0]
             text     = _clean(line[1][0])
             score    = line[1][1]
@@ -482,5 +558,20 @@ def _get_ocr_engine():
             det_db_thresh=0.2,
             cpu_threads=4,
             show_log=False,
+        )
+        try:
+            import paddle
+            paddle_ver = paddle.__version__
+        except Exception:
+            paddle_ver = "unavailable"
+        try:
+            import paddleocr as _poc_mod
+            poc_ver = _poc_mod.__version__
+        except Exception:
+            poc_ver = "unavailable"
+        logger.info(
+            "[OCR-ENV] python=%s paddleocr=%s paddlepaddle=%s cv2=%s numpy=%s mem=%.0fMB",
+            sys.version.split()[0], poc_ver, paddle_ver,
+            cv2.__version__, np.__version__, _mem_mb(),
         )
     return _ocr_engine
