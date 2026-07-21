@@ -224,7 +224,7 @@ After `read_callouts()` returns, any OCR callout whose `(x, y)` falls within the
 
 ---
 
-## Summary of Files Changed
+## Summary of Files Changed (Problems 1–10)
 
 | File | Change |
 |---|---|
@@ -236,3 +236,242 @@ After `read_callouts()` returns, any OCR callout whose `(x, y)` falls within the
 | `ai-worker/.env` | `LLM_ENABLED` toggled during testing (currently `true`) |
 | `backend/src/models/Result.model.js` | Added `paddleocr_enhanced` and `gemini_vision` to `extractionMethod` enum |
 | `frontend/src/hooks/useJobPoller.js` | Reset `job`/`result`/`error` state when `jobId` becomes null (New PDF button fix) |
+
+---
+
+---
+
+# Cloud Run Deployment Fixes — 2026-07-20 to 2026-07-21
+
+These bugs were discovered after deploying to Google Cloud Run (asia-southeast1). The pipeline worked correctly on local Windows but failed in the Cloud Run Linux Docker container.
+
+---
+
+## Problem 11: Python Diagnostic Logs Invisible in Cloud Run
+
+### What was happening
+All Python `logger.info` / `logger.warning` output was invisible in Cloud Run logs. The pipeline appeared to run silently — no OCR diagnostics, no Strategy E logs, nothing useful for debugging.
+
+### Root cause
+`utils/logger.py` used `logging.StreamHandler(sys.stdout)`. Node.js reads the Python subprocess's **stdout** as the newline-delimited JSON protocol channel (`{"status": "processing", ...}`). Non-JSON lines from Python were not valid protocol messages, so `python.bridge.js` caught them in a `logger.debug()` call — which is filtered out in Cloud Run's default log level (INFO and above).
+
+### Fix (`ai-worker/utils/logger.py`)
+Changed the handler stream from `sys.stdout` to `sys.stderr`:
+```python
+# Before
+_handler = logging.StreamHandler(sys.stdout)
+# After
+_handler = logging.StreamHandler(sys.stderr)
+```
+Node.js `python.bridge.js` forwards all Python stderr lines as `logger.warn(...)`, which appears in Cloud Run logs as `[warn]` entries — always visible regardless of log level.
+
+**Result**: All Python pipeline logs now visible in Cloud Run as `[warn]` prefixed entries.
+
+---
+
+## Problem 12: Strategy E (Gemini Vision) Timing Out on Colored PDFs in Cloud Run
+
+### What was happening
+Strategy E timed out when processing colored PDFs on Cloud Run. The non-colored PDF took ~54s (borderline success); the colored PDF triggered a 503 on the first attempt, then a read timeout after 60s on the retry.
+
+**Log evidence:**
+```
+Strategy E: Gemini call FAILED after 60s+ (ReadTimeout)
+```
+
+### Root cause
+The colored diagram was 2481×2504px. Encoding it as a full-resolution PNG produced a ~5–8MB payload. Sending this from Cloud Run's Singapore region (`asia-southeast1`) to Gemini's US endpoints over the public internet was too slow — the response body arrived after the 60s timeout.
+
+Local testing was unaffected because local → Gemini latency is lower and there is no container cold-start overhead.
+
+### Fix (`ai-worker/modules/strategy_e_recovery.py`)
+Added image resize in `_encode_image()` before PNG encoding — max 1500px on the longest side:
+```python
+def _encode_image(image: np.ndarray) -> str:
+    h, w = image.shape[:2]
+    max_dim = 1500
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        logger.info("_encode_image: resized %dx%d -> %dx%d for Gemini payload", w, h, new_w, new_h)
+    success, buf = cv2.imencode(".png", image)
+    ...
+```
+Also increased the minimum timeout from `max(LLM_TIMEOUT_SECONDS, 60)` to `max(LLM_TIMEOUT_SECONDS, 120)`.
+
+**Result**: Non-colored PDF: ~11s (was 54s). Colored PDF: ~10s (was >60s timeout). Callout circle numbers remain legible at 1500px — Gemini confirmed 1.00 confidence on all detections.
+
+---
+
+## Problem 13: PaddleOCR Non-Deterministic Results on Cloud Run
+
+### What was happening
+PaddleOCR returned different callout sets across Cloud Run deployments of the same PDF:
+- Revision 00007: OCR returned 0 callouts (all tiles returned None or empty)
+- Revision 00008 and later: OCR returned 6–12 callouts per run, but the specific refs varied
+
+Same PDF, same Docker image tag — different OCR results.
+
+### Diagnostic logging added (`ai-worker/modules/callout_reader.py`)
+Added `[OCR-DIAG]` logs per tile showing shape, memory before/after, raw box count, and first 8 text+score samples:
+```
+[OCR-DIAG] tile 2/3 rows=626-1668 shape=2481x1042 mem_before=1298MB
+[OCR-DIAG] tile 2: 5 raw box(es) mem_after=1356MB sample=[('1', 0.906), ('7', 0.595), ...]
+[OCR-DIAG] tile 2: 2/5 box(es) passed digit+score+zone filter
+```
+
+### Root cause
+Best current hypothesis: non-deterministic transitive dependency resolution in Docker builds. PaddleOCR's inference is sensitive to the exact versions of `numpy`, `opencv-python`, and `paddlepaddle` resolved at build time. Different builds may get slightly different minor versions, producing different OCR outputs.
+
+Memory was ruled out: peak usage reaches ~2100MB but the pipeline completes. Model files were confirmed present (inference runs, just returns variable results).
+
+### Status
+Not fully resolved. Strategy E (Gemini Vision) currently compensates for missed OCR detections on colored circle refs. Strategy D (per-circle PaddleOCR with multi-variant voting) recovers a subset. Pinning exact dependency versions in `requirements.txt` is the recommended next step.
+
+---
+
+## Problem 14: Strategy E JSON Parse Failure (Gemini Returns Malformed JSON)
+
+### What was happening
+Strategy E failed with:
+```
+Strategy E: Gemini call FAILED after 9876 ms
+(Expecting ',' delimiter: line 57 column 4 (char 1812))
+```
+All 9 missing refs remained unpositioned despite Gemini responding in under 10s.
+
+### Root cause
+Gemini `gemini-3.5-flash` occasionally produces JSON responses with:
+1. **Markdown fences** — wraps the JSON in ` ```json ... ``` `
+2. **Trailing content** — appends prose or a newline after the closing `}`
+3. **Internal malformation** — a missing comma or extra character deep inside the JSON object (char 1812 in this case)
+
+`json.loads()` throws on all three of these. The exception was caught by the outer `except Exception` block and the entire Strategy E result was discarded.
+
+### Fix (`ai-worker/modules/strategy_e_recovery.py`)
+Three-layer hardening of the JSON parse in `_call_gemini()`:
+
+1. **Strip markdown fences** before parsing:
+```python
+cleaned = raw_text
+if cleaned.startswith("```"):
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = cleaned.strip()
+```
+
+2. **Use `raw_decode` instead of `json.loads`** — consumes only the first valid JSON object, ignores trailing content:
+```python
+parsed, _ = json.JSONDecoder().raw_decode(cleaned)
+```
+
+3. **Diagnostic window on failure** — logs ±300 chars around the error position so the exact malformation is visible in logs without exposing API keys:
+```python
+except json.JSONDecodeError as e:
+    pos = e.pos
+    win_s = max(0, pos - 300)
+    win_e = min(len(cleaned), pos + 300)
+    logger.warning(
+        "Strategy E: JSON parse failed at pos=%d (response_len=%d): %s — "
+        "context [%d:%d]: %r",
+        pos, len(cleaned), e.msg, win_s, win_e, cleaned[win_s:win_e],
+    )
+    raise
+```
+
+**Note**: The `raw_decode` fix handles trailing-content and fence cases. If the error is at char 1812 inside a 2000-char response, it is internally malformed JSON — the diagnostic window will identify what Gemini wrote at that position on the next occurrence.
+
+---
+
+## Problem 15: OCR False Positive "28" Triggering Unnecessary Gemini Call
+
+### What was happening
+PaddleOCR consistently misread a diagram element (part of the "Bobcat" watermark or footer text) as `"28"` with 0.938 confidence. This hotspot had no BOM match (the BOM for this assembly has refs 1–13 only). Despite no possible mapping, `llm_resolver` was called with `"28"` as an unmapped hotspot — making a full Gemini API call that always failed or got rate-limited (429):
+
+```
+llm_resolver: calling Gemini — 0 fuzzy mapping(s), 1 unmapped hotspot(s)
+Gemini 429 (attempt 1) — retrying in 5s
+Gemini 429 (attempt 2) — retrying in 15s
+llm_resolver: LLM call failed after 20528 ms (429 ...)
+```
+
+### Root cause
+`llm_resolver` was called whenever `unmapped_hotspots` was non-empty, without checking whether any of those hotspot refs could conceivably map to a BOM row.
+
+### Fix (`ai-worker/main.py`)
+Before calling `llm_resolver`, filter `unmapped_hotspots` to only those whose normalized ref number exists in the BOM ref set. Refs not in the BOM are kept in the final result but not sent to Gemini:
+
+```python
+_norm_r = lambda r: str(r).strip().lstrip("0") or "0"
+_bom_ref_set = {_norm_r(r["ref_no"]) for r in bom_rows}
+_all_unmapped     = mapping_result["unmapped_hotspots"]
+_valid_unmapped   = [h for h in _all_unmapped if _norm_r(h["number"]) in _bom_ref_set]
+_invalid_unmapped = [h for h in _all_unmapped if _norm_r(h["number"]) not in _bom_ref_set]
+# Only call llm_resolver if there's something valid to resolve
+if _valid_unmapped or _has_fuzzy:
+    ...call llm_resolver with _valid_unmapped only...
+    # Restore invalid refs to final result (visible but not sent to Gemini)
+    mapping_result["unmapped_hotspots"] += _invalid_unmapped
+```
+
+**Result**: `"28"` is filtered before llm_resolver, logged as excluded, and preserved in the final unmapped list. The unnecessary Gemini call is skipped entirely, saving ~20s and one quota unit.
+
+---
+
+## Problem 16: Colored OCR Fallback Creating Duplicate Hotspots
+
+### What was happening
+After introducing the colored OCR fallback mechanism (save dropped colored-circle OCR callouts; restore if Strategy E doesn't resolve them), refs 1, 3, and 10 appeared as **unmapped hotspots** in the result even though they were successfully detected and mapped:
+
+```
+unmapped hotspots: ['28', '1', '10', '3']
+unpositioned BOM rows: ['4', '5', '6', '8', '9']
+```
+Refs 1, 3, 10 appeared in the BOM list as correctly mapped in the frontend (because `llm_resolver` compensated), but the raw pipeline output was incorrect.
+
+### Root cause
+The fallback restoration check only excluded refs recovered by Strategy E (`_strategy_e_recovered_refs`). It did **not** check refs already resolved by Strategy D.
+
+Timeline:
+1. OCR detects refs 1, 3, 7, 10 inside colored circles → saved as fallbacks, dropped from `callouts`
+2. Strategy D recovers refs 1, 3, 2, 10 at correct colored circle centers → added to `callouts`
+3. Strategy E gets 429 → `_strategy_e_recovered_refs = {}`
+4. Fallback restoration: refs 1, 3, 10 pass the check (`not in _strategy_e_recovered_refs`) → **added again**
+5. `callouts` now has two entries each for refs 1, 3, and 10
+6. Mapping engine maps the Strategy D version → BOM row taken
+7. The duplicate OCR version has nowhere to map → becomes "unmapped hotspot"
+
+### Fix (`ai-worker/main.py`)
+Changed the deduplication check from `_strategy_e_recovered_refs` (Strategy E only) to `_already_resolved` (all currently resolved refs in `callouts`):
+
+```python
+# Before
+_restored = [
+    fb for ref, fb in colored_ocr_fallbacks.items()
+    if ref not in _strategy_e_recovered_refs and ref in _bom_refs
+]
+
+# After
+_already_resolved = {_norm(c["number"]) for c in callouts}
+_restored = [
+    fb for ref, fb in colored_ocr_fallbacks.items()
+    if ref not in _already_resolved and ref in _bom_refs
+]
+```
+
+At the time of restoration, `callouts` already contains all Strategy D and Strategy E results. So `_already_resolved` correctly covers all upstream sources.
+
+**Result**: Refs 1, 3, 10 resolved by Strategy D are skipped at restoration. No duplicate hotspots. Only genuinely unresolved BOM refs that passed OCR are restored from the fallback.
+
+---
+
+## Summary of Files Changed (Problems 11–16)
+
+| File | Change |
+|---|---|
+| `ai-worker/utils/logger.py` | Changed `StreamHandler` from `sys.stdout` → `sys.stderr` so Python logs appear in Cloud Run |
+| `ai-worker/modules/strategy_e_recovery.py` | Resize image to max 1500px before Gemini encoding; increase timeout to 120s; strip markdown fences + use `raw_decode` + log diagnostic window on JSON parse failure; added `import re` |
+| `ai-worker/modules/callout_reader.py` | Added `[OCR-ENV]` and `[OCR-DIAG]` diagnostic logging per tile and per Strategy C circle |
+| `ai-worker/main.py` | Save colored OCR callouts as fallbacks instead of discarding; restore only unresolved BOM refs checking all `callouts` (not just Strategy E); filter non-BOM unmapped refs before `llm_resolver`; added `[CIRCLE]`/`[CALLOUT]`/`[STRATEGY_D]`/`[STRATEGY_E]`/`[HOTSPOTS]` pipeline counters |

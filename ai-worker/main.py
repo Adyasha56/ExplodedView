@@ -252,14 +252,16 @@ def run(job_id: str, storage_path: Path) -> None:
                 assembly_index,
             )
 
-        # Restore colored OCR fallbacks for refs Strategy E did not resolve.
-        # Only restores refs present in the BOM — OCR false positives are discarded.
+        # Restore colored OCR fallbacks for refs not resolved by any strategy.
+        # Checks against all current callouts (covers Strategy D and E) to avoid
+        # adding duplicate hotspots for refs already positioned by another source.
         if colored_ocr_fallbacks:
             _norm = lambda r: str(r).strip().lstrip("0") or "0"
             _bom_refs = {_norm(r["ref_no"]) for r in bom_rows}
+            _already_resolved = {_norm(c["number"]) for c in callouts}
             _restored = [
                 fb for ref, fb in colored_ocr_fallbacks.items()
-                if ref not in _strategy_e_recovered_refs and ref in _bom_refs
+                if ref not in _already_resolved and ref in _bom_refs
             ]
             if _restored:
                 callouts = callouts + _restored
