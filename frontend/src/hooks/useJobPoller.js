@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { getJobStatus, getResult } from '../api/pipeline';
 
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 500;
 const TERMINAL = new Set(['done', 'error']);
 
 export function useJobPoller(jobId) {

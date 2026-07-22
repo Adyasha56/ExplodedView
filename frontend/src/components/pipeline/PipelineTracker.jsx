@@ -6,7 +6,7 @@ function StepIcon({ state }) {
   if (state === 'active')    return <FiCircle className="text-purple-600" />;
   if (state === 'skipped')   return <FiMinus className="text-gray-300" />;
   if (state === 'failed')    return <FiX className="text-red-500" />;
-  return <FiCircle className="text-gray-200" />;
+  return <FiCircle className="text-gray-300" />;
 }
 
 export default function PipelineTracker({ pipelineStep, jobStatus, filename }) {
@@ -28,7 +28,7 @@ export default function PipelineTracker({ pipelineStep, jobStatus, filename }) {
               step.state === 'completed' ? 'text-gray-700 font-medium' :
               step.state === 'skipped'   ? 'text-gray-300' :
               step.state === 'failed'    ? 'text-red-500' :
-              'text-gray-300'
+              'text-gray-400'
             }`}>
               {step.label}
               {step.optional && step.state === 'skipped' && (

@@ -18,7 +18,7 @@ export default function Workspace() {
   const [selectedAssemblyIndex, setSelectedAssemblyIndex] = useState(0);
   const [selectedRef, setSelectedRef]         = useState(null);
 
-  const { upload, cancel, uploading, error: uploadError } = useUpload();
+  const { upload, cancel, uploading, error: uploadError, clearError } = useUpload();
   const { job, result, error: pollError } = useJobPoller(jobId);
 
   const error = uploadError || pollError;
@@ -36,10 +36,20 @@ export default function Workspace() {
   }
 
   function handleReset() {
+    clearError();
     setFile(null);
     setJobId(null);
     setSelectedAssemblyIndex(0);
     setSelectedRef(null);
+  }
+
+  function handleRetry() {
+    if (file) {
+      setJobId(null);
+      upload(file, (id) => setJobId(id));
+    } else {
+      handleReset();
+    }
   }
 
   function handleSelectAssembly(index) {
@@ -147,7 +157,7 @@ export default function Workspace() {
           <h1 className="text-base font-semibold text-gray-900 mb-1">Analysing PDF</h1>
 
           {error ? (
-            <ErrorBanner message={error} onRetry={handleReset} />
+            <ErrorBanner message={error} onRetry={handleRetry} />
           ) : (
             <PipelineTracker
               pipelineStep={job?.pipelineStep}
@@ -180,7 +190,7 @@ export default function Workspace() {
           />
         )}
 
-        {error && <ErrorBanner message={error} onRetry={handleReset} />}
+        {error && <ErrorBanner message={error} onRetry={handleRetry} />}
       </div>
     </div>
   );

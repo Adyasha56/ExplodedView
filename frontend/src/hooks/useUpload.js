@@ -24,5 +24,9 @@ export function useUpload() {
     abortRef.current?.abort();
   }
 
-  return { upload, cancel, uploading, error };
+  function clearError() {
+    setError(null);
+  }
+
+  return { upload, cancel, uploading, error, clearError };
 }
