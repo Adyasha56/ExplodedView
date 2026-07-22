@@ -157,7 +157,7 @@ export default function Workspace() {
           <h1 className="text-base font-semibold text-gray-900 mb-1">Analysing PDF</h1>
 
           {error ? (
-            <ErrorBanner message={error} onRetry={handleRetry} />
+            <ErrorBanner message={error} onRetry={handleRetry} onDismiss={handleReset} />
           ) : (
             <PipelineTracker
               pipelineStep={job?.pipelineStep}
@@ -190,7 +190,7 @@ export default function Workspace() {
           />
         )}
 
-        {error && <ErrorBanner message={error} onRetry={handleRetry} />}
+        {error && <ErrorBanner message={error} onRetry={handleRetry} onDismiss={handleReset} />}
       </div>
     </div>
   );
