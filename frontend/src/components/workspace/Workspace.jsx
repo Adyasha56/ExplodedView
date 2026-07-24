@@ -14,7 +14,7 @@ const DOTTED_BG = `url("data:image/svg+xml,%3Csvg width='24' height='24' xmlns='
 
 export default function Workspace() {
   const [file, setFile]                       = useState(null);
-  const [jobId, setJobId]                     = useState(null);
+  const [jobId, setJobId]                     = useState(() => new URLSearchParams(window.location.search).get('job'));
   const [selectedAssemblyIndex, setSelectedAssemblyIndex] = useState(0);
   const [selectedRef, setSelectedRef]         = useState(null);
 
@@ -32,7 +32,10 @@ export default function Workspace() {
   }
 
   function handleUpload() {
-    upload(file, (id) => setJobId(id));
+    upload(file, (id) => {
+      window.history.replaceState(null, '', `?job=${id}`);
+      setJobId(id);
+    });
   }
 
   function handleReset() {
@@ -41,6 +44,7 @@ export default function Workspace() {
     setJobId(null);
     setSelectedAssemblyIndex(0);
     setSelectedRef(null);
+    window.history.replaceState(null, '', window.location.pathname);
   }
 
   function handleRetry() {
