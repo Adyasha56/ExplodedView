@@ -30,3 +30,8 @@ Thumbs.db
 .idea/
 
 dist/
+
+# ── Claude Code tooling (local, not part of the app) ───────────────────────────
+.claude/
+.agents/
+skills-lock.json

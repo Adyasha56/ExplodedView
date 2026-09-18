@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { staticUrl } from '../../api/static';
 import DropZone from '../upload/DropZone';
 import UploadBar from '../upload/UploadBar';
@@ -12,11 +13,18 @@ import { useJobPoller } from '../../hooks/useJobPoller';
 // Dotted grid background pattern as an inline SVG data URL
 const DOTTED_BG = `url("data:image/svg+xml,%3Csvg width='24' height='24' xmlns='http://www.w3.org/2000/svg'%3E%3Ccircle cx='1' cy='1' r='1' fill='%23cbd5e1'/%3E%3C/svg%3E")`;
 
+const SAMPLE_PDF_URL = '/samples/tilt-cylinder-sample.pdf';
+const SAMPLE_PDF_NAME = 'tilt-cylinder-sample.pdf';
+
 export default function Workspace() {
+  const [searchParams, setSearchParams]       = useSearchParams();
   const [file, setFile]                       = useState(null);
-  const [jobId, setJobId]                     = useState(() => new URLSearchParams(window.location.search).get('job'));
+  const [jobId, setJobId]                     = useState(() => searchParams.get('job'));
   const [selectedAssemblyIndex, setSelectedAssemblyIndex] = useState(0);
   const [selectedRef, setSelectedRef]         = useState(null);
+  const [loadingSample, setLoadingSample]     = useState(false);
+
+  const autoLoadSample = searchParams.get('sample') === '1';
 
   const { upload, cancel, uploading, error: uploadError, clearError } = useUpload();
   const { job, result, error: pollError } = useJobPoller(jobId);
@@ -31,12 +39,38 @@ export default function Workspace() {
     setFile(f);
   }
 
-  function handleUpload() {
-    upload(file, (id) => {
-      window.history.replaceState(null, '', `?job=${id}`);
+  function startUpload(f) {
+    upload(f, (id) => {
       setJobId(id);
+      setSearchParams({ job: id }, { replace: true });
     });
   }
+
+  function handleUpload() {
+    startUpload(file);
+  }
+
+  async function loadSample() {
+    setLoadingSample(true);
+    try {
+      const res = await fetch(SAMPLE_PDF_URL);
+      const blob = await res.blob();
+      const sampleFile = new File([blob], SAMPLE_PDF_NAME, { type: 'application/pdf' });
+      setFile(sampleFile);
+      startUpload(sampleFile);
+    } finally {
+      setLoadingSample(false);
+    }
+  }
+
+  const autoSampleTriggered = useRef(false);
+  useEffect(() => {
+    if (autoLoadSample && !autoSampleTriggered.current) {
+      autoSampleTriggered.current = true;
+      loadSample();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoLoadSample]);
 
   function handleReset() {
     clearError();
@@ -44,13 +78,16 @@ export default function Workspace() {
     setJobId(null);
     setSelectedAssemblyIndex(0);
     setSelectedRef(null);
-    window.history.replaceState(null, '', window.location.pathname);
+    setSearchParams({}, { replace: true });
   }
 
   function handleRetry() {
     if (file) {
       setJobId(null);
-      upload(file, (id) => setJobId(id));
+      upload(file, (id) => {
+        setJobId(id);
+        setSearchParams({ job: id }, { replace: true });
+      });
     } else {
       handleReset();
     }
@@ -76,7 +113,7 @@ export default function Workspace() {
         {/* ── Top bar ── */}
         <header className="flex items-center justify-between px-5 py-3 border-b border-gray-200 shrink-0 bg-white">
           <div>
-            <h1 className="text-sm font-semibold text-gray-900">ExplodedView</h1>
+            <Link to="/" className="text-sm font-semibold text-gray-900 hover:text-purple-600 transition-colors">ExplodedView</Link>
             <p className="text-xs text-gray-400 mt-0.5">{job?.filename}</p>
           </div>
           <button
@@ -179,12 +216,23 @@ export default function Workspace() {
     <div className="min-h-screen flex flex-col items-center justify-center bg-white px-4" style={{ backgroundImage: DOTTED_BG }}>
       <div className="w-full max-w-md px-4">
         <div className="mb-8 text-center">
-          <h1 className="text-xl font-semibold tracking-tight text-gray-950">ExplodedView</h1>
+          <h1 className="text-xl font-semibold tracking-tight text-gray-950">
+            <Link to="/" className="hover:text-purple-600 transition-colors">ExplodedView</Link>
+          </h1>
           <p className="text-sm text-gray-500 mt-1.5">Upload an engineering PDF to begin</p>
         </div>
 
         {!file ? (
-          <DropZone onFile={handleFile} />
+          <>
+            <DropZone onFile={handleFile} />
+            <button
+              onClick={loadSample}
+              disabled={loadingSample}
+              className="mt-4 w-full text-center text-xs text-gray-500 hover:text-purple-600 disabled:opacity-50"
+            >
+              {loadingSample ? 'Loading sample…' : "Don't have a PDF? Try a sample assembly"}
+            </button>
+          </>
         ) : (
           <UploadBar
             file={file}
