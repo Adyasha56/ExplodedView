@@ -127,6 +127,9 @@ ExplodedView/
 |       +-- logger.py
 |
 +-- frontend/                       React 18 + Vite application
+|   +-- public/
+|   |   +-- samples/
+|   |       +-- tilt-cylinder-sample.pdf  Bundled sample PDF for the one-click demo
 |   +-- src/
 |   |   +-- api/
 |   |   |   +-- pipeline.js         API client (uploadPdf, getJobStatus, getResult)
@@ -135,6 +138,7 @@ ExplodedView/
 |   |   |   +-- useUpload.js        Upload state management
 |   |   |   +-- useJobPoller.js     Polls job status after upload
 |   |   +-- components/
+|   |   |   +-- landing/            Landing (marketing page), PipelineDemo (live pipeline preview)
 |   |   |   +-- upload/             DropZone, UploadBar
 |   |   |   +-- pipeline/           PipelineTracker progress display
 |   |   |   +-- viewer/             DiagramCanvas, BomPanel, HotspotPin, AssemblySection
@@ -142,7 +146,9 @@ ExplodedView/
 |   |   |   +-- shared/             ErrorBanner
 |   |   +-- utils/
 |   |       +-- pipelineSteps.js    Maps pipeline step names to display labels
+|   |   +-- App.jsx                 Router: "/" -> Landing, "/upload" -> Workspace
 |   +-- index.html
+|   +-- vercel.json                 SPA rewrite so /upload doesn't 404 on refresh
 |   +-- vite.config.js
 |
 +-- render.yaml                     Render deployment config (legacy, kept for reference)
@@ -470,8 +476,9 @@ PDF file on disk
 |---|---|---|
 | React | 18.3 | UI component library. State management for the upload flow, pipeline progress display, and interactive diagram viewer is handled with built-in hooks (useState, useEffect, useRef). No external state manager was needed. |
 | Vite | 5.4 | Build tool and dev server. Provides fast hot module replacement in development and an optimised production bundle. The dev server proxy forwards `/api` and `/static` requests to the local Node.js backend, so the frontend needs no environment configuration in development. |
-| Tailwind CSS | 3.4 | Utility-first CSS framework. Used for all styling. Eliminates the need for separate CSS files and keeps component markup self-contained. |
+| Tailwind CSS | 3.4 | Utility-first CSS framework. Used for all styling in the app views. Eliminates the need for separate CSS files and keeps component markup self-contained. |
 | React Icons | 5.3 | SVG icon components. Used for step state icons in the pipeline tracker (check, cross, circle) and file/close icons in the upload bar. |
+| React Router DOM | 6 | Client-side routing. Two routes: `/` (landing page) and `/upload` (the app). Lets the browser Back/Forward buttons work correctly between the two, and keeps old `?job=...` result links working via a redirect to `/upload`. |
 
 ### Infrastructure
 
@@ -596,7 +603,14 @@ Response:
 
 ## Frontend Architecture
 
-The frontend has three display states managed by `Workspace.jsx`.
+The frontend has two routes, managed by React Router in `App.jsx`:
+
+- **`/`** — `Landing.jsx`, a marketing page. Its hero includes `PipelineDemo.jsx`, a hand-built animation that cycles through the real nine pipeline stages (the same list `PipelineTracker` uses) so a visitor sees what the pipeline does before uploading anything.
+- **`/upload`** — `Workspace.jsx`, the actual app (upload → processing → interactive viewer, described below).
+
+Both the landing page and the empty upload state offer **"Try a sample assembly"**, which fetches a bundled PDF from `public/samples/tilt-cylinder-sample.pdf` and runs it through the exact same upload flow as a real file — no need for a visitor to supply their own PDF to see the pipeline work end to end.
+
+The frontend has three display states within `/upload`, managed by `Workspace.jsx`.
 
 ```
                     +------------------+
@@ -679,6 +693,8 @@ The result viewer loads the diagram image directly from Cloudinary. Hotspot pins
 ```
 
 ![Backend Request and Processing Flow](images/Exploded%20view%20-%20visual%20selection.png)
+
+Since the frontend is a client-side-routed SPA (`/` and `/upload`), `frontend/vercel.json` rewrites every path to `index.html` so a direct visit or refresh on `/upload` doesn't 404.
 
 ### Docker Image
 
@@ -848,6 +864,6 @@ cd frontend
 npm run dev
 ```
 
-The Vite dev server runs on port 5173 and proxies `/api` and `/static` requests to the backend on port 5000. Open `http://localhost:5173` in a browser.
+The Vite dev server runs on port 5173 and proxies `/api` and `/static` requests to the backend on port 5000. Open `http://localhost:5173` in a browser for the landing page, or `http://localhost:5173/upload` to go straight to the app. From the landing page, "Try a sample assembly" runs the bundled sample PDF through the full pipeline without needing a PDF of your own.
 
 The `VITE_API_URL` variable should be empty or absent in local development. The Vite proxy handles routing automatically.
