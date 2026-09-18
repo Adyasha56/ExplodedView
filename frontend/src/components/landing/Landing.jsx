@@ -59,7 +59,7 @@ export default function Landing() {
               <a className="btn btn--outline" href="#how-it-works">See how it works</a>
             </div>
             <button className="hero__sample-link" onClick={() => launch(true)}>
-              No PDF handy? Try a sample assembly →
+              No PDF handy? <span className="hero__sample-link-highlight">Try a sample assembly →</span>
             </button>
           </div>
           <div className="hero__demo reveal" style={{ '--i': 1 }}>

@@ -228,9 +228,18 @@ export default function Workspace() {
             <button
               onClick={loadSample}
               disabled={loadingSample}
-              className="mt-4 w-full text-center text-xs text-gray-500 hover:text-purple-600 disabled:opacity-50"
+              className="mt-4 w-full text-center text-xs text-gray-500 disabled:opacity-50"
             >
-              {loadingSample ? 'Loading sample…' : "Don't have a PDF? Try a sample assembly"}
+              {loadingSample ? (
+                'Loading sample…'
+              ) : (
+                <>
+                  {"Don't have a PDF? "}
+                  <span className="font-semibold text-purple-600 underline underline-offset-2 decoration-purple-300 hover:decoration-purple-600 transition-colors">
+                    Try a sample assembly
+                  </span>
+                </>
+              )}
             </button>
           </>
         ) : (

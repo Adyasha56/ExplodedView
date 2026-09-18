@@ -222,9 +222,18 @@ html, body { overflow-x: clip; }
   font-size: 0.85rem;
   color: var(--color-muted);
   cursor: pointer;
-  transition: color var(--dur-short) var(--ease-out);
 }
-.landing-page .hero__sample-link:hover { color: var(--color-accent-strong); }
+.landing-page .hero__sample-link-highlight {
+  color: var(--color-accent-strong);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in oklch, var(--color-accent-strong) 45%, transparent);
+  transition: text-decoration-color var(--dur-short) var(--ease-out);
+}
+.landing-page .hero__sample-link:hover .hero__sample-link-highlight {
+  text-decoration-color: var(--color-accent-strong);
+}
 
 /* ── Pipeline demo ───────────────────────────────────────────── */
 
