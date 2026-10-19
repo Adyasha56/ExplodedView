@@ -132,11 +132,11 @@ ExplodedView/
 |   |       +-- tilt-cylinder-sample.pdf  Bundled sample PDF for the one-click demo
 |   +-- src/
 |   |   +-- api/
-|   |   |   +-- pipeline.js         API client (uploadPdf, getJobStatus, getResult)
+|   |   |   +-- pipeline.js         API client (uploadPdf, streamJobStatusUrl, getResult)
 |   |   |   +-- static.js           URL helper for Cloudinary vs local static images
 |   |   +-- hooks/
 |   |   |   +-- useUpload.js        Upload state management
-|   |   |   +-- useJobPoller.js     Polls job status after upload
+|   |   |   +-- useJobPoller.js     Subscribes to job status via SSE after upload
 |   |   +-- components/
 |   |   |   +-- landing/            Landing (marketing page), PipelineDemo (live pipeline preview)
 |   |   |   +-- upload/             DropZone, UploadBar
@@ -521,19 +521,20 @@ Error response (HTTP 500):
 
 ---
 
-### GET /api/jobs/:jobId
+### GET /api/jobs/:jobId/stream
 
-Returns the current status of a job. Used by the frontend to check progress and by the polling hook after upload completes.
+Server-Sent Events stream of job status. The frontend's `useJobPoller` hook opens this with `EventSource` right after upload; the server pushes an event immediately with the current state, then one more each time the pipeline advances a step, until a terminal status (`done`/`error`) closes the stream.
 
-Response:
+Each event's `data` payload:
 ```json
 {
   "jobId": "550e8400-e29b-41d4-a716-446655440000",
   "status": "done",
   "pipelineStep": "COMPLETED",
   "filename": "assembly.pdf",
-  "fileSizeBytes": 2048000,
-  "errorMessage": null
+  "errorMessage": null,
+  "createdAt": "2026-10-19T10:00:00.000Z",
+  "updatedAt": "2026-10-19T10:00:05.000Z"
 }
 ```
 

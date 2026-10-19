@@ -10,6 +10,7 @@ const Job = require('../models/Job.model');
 const Result = require('../models/Result.model');
 const cleanupService = require('./cleanup.service');
 const cloudinaryService = require('./cloudinary.service');
+const jobEvents = require('../utils/jobEvents');
 
 // Python emits lowercase_underscore step names; normalise to PipelineState constants.
 const STEP_MAP = {
@@ -29,10 +30,12 @@ exports.runPipeline = (jobId) => {
     const startTime = Date.now();
     logger.info(`[${jobId}] Spawning Python worker`);
 
-    await Job.findOneAndUpdate(
+    const initialJob = await Job.findOneAndUpdate(
       { jobId },
-      { status: 'processing', pipelineStep: PipelineState.PAGE_CLASSIFICATION }
-    );
+      { status: 'processing', pipelineStep: PipelineState.PAGE_CLASSIFICATION },
+      { new: true }
+    ).lean();
+    jobEvents.emit(jobId, initialJob);
 
     const args = [
       config.python.workerPath,
@@ -66,9 +69,12 @@ exports.runPipeline = (jobId) => {
       if (msg.status === 'processing' && msg.step) {
         const pipelineStep = STEP_MAP[msg.step] ?? msg.step;
         logger.info(`[${jobId}] Pipeline step: ${pipelineStep}`);
-        await Job.findOneAndUpdate({ jobId }, { pipelineStep }).catch((err) => {
-          logger.error(`[${jobId}] Failed to update pipelineStep: ${err.message}`);
-        });
+        await Job.findOneAndUpdate({ jobId }, { pipelineStep }, { new: true })
+          .lean()
+          .then((updatedJob) => jobEvents.emit(jobId, updatedJob))
+          .catch((err) => {
+            logger.error(`[${jobId}] Failed to update pipelineStep: ${err.message}`);
+          });
       }
 
       if (msg.status === 'done') {
@@ -174,10 +180,12 @@ async function _handleSuccess(jobId, durationMs) {
   }
 
   await Result.create({ ...resultData, jobId });
-  await Job.findOneAndUpdate(
+  const doneJob = await Job.findOneAndUpdate(
     { jobId },
-    { status: 'done', pipelineStep: PipelineState.COMPLETED }
-  );
+    { status: 'done', pipelineStep: PipelineState.COMPLETED },
+    { new: true }
+  ).lean();
+  jobEvents.emit(jobId, doneJob);
 
   logger.info(`[${jobId}] Result saved to MongoDB`);
 
@@ -187,8 +195,10 @@ async function _handleSuccess(jobId, durationMs) {
 }
 
 async function _handleFailure(jobId, message) {
-  await Job.findOneAndUpdate(
+  const failedJob = await Job.findOneAndUpdate(
     { jobId },
-    { status: 'error', pipelineStep: PipelineState.FAILED, errorMessage: message }
-  );
+    { status: 'error', pipelineStep: PipelineState.FAILED, errorMessage: message },
+    { new: true }
+  ).lean();
+  jobEvents.emit(jobId, failedJob);
 }

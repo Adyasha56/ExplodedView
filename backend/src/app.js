@@ -61,7 +61,7 @@ mongoose
       logger.info(`Storage root → ${config.storage.root}`);
       logger.info('Routes mounted:');
       logger.info('  POST /api/upload');
-      logger.info('  GET  /api/jobs/:jobId');
+      logger.info('  GET  /api/jobs/:jobId/stream');
       logger.info('  GET  /api/results/:jobId');
       logger.info('  GET  /static/outputs/:jobId/diagram.png');
       logger.info('  GET  /health');

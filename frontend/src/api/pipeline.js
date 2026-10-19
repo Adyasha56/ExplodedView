@@ -12,10 +12,8 @@ export async function uploadPdf(file, signal) {
   return res.json(); // { jobId, status }
 }
 
-export async function getJobStatus(jobId) {
-  const res = await fetch(`${BASE}/jobs/${jobId}`);
-  if (!res.ok) throw new Error(`Job poll failed: ${res.status}`);
-  return res.json();
+export function streamJobStatusUrl(jobId) {
+  return `${BASE}/jobs/${jobId}/stream`;
 }
 
 export async function getResult(jobId) {

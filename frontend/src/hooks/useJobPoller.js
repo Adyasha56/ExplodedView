@@ -1,14 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
-import { getJobStatus, getResult } from '../api/pipeline';
-
-const POLL_INTERVAL_MS = 500;
-const TERMINAL = new Set(['done', 'error']);
+import { useEffect, useState } from 'react';
+import { streamJobStatusUrl, getResult } from '../api/pipeline';
 
 export function useJobPoller(jobId) {
   const [job, setJob] = useState(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
-  const timerRef = useRef(null);
 
   useEffect(() => {
     setJob(null);
@@ -17,33 +13,39 @@ export function useJobPoller(jobId) {
     if (!jobId) return;
     let cancelled = false;
 
-    async function poll() {
-      try {
-        const data = await getJobStatus(jobId);
-        if (cancelled) return;
-        setJob(data);
+    const source = new EventSource(streamJobStatusUrl(jobId));
 
-        if (data.status === 'error') {
-          setError(data.errorMessage || 'Pipeline failed.');
-          return;
-        }
+    source.onmessage = async (event) => {
+      if (cancelled) return;
+      const data = JSON.parse(event.data);
+      setJob(data);
 
-        if (data.status === 'done') {
+      if (data.status === 'error') {
+        setError(data.errorMessage || 'Pipeline failed.');
+        source.close();
+        return;
+      }
+
+      if (data.status === 'done') {
+        source.close();
+        try {
           const res = await getResult(jobId);
           if (!cancelled) setResult(res);
-          return;
+        } catch (err) {
+          if (!cancelled) setError(err.message);
         }
-
-        timerRef.current = setTimeout(poll, POLL_INTERVAL_MS);
-      } catch (err) {
-        if (!cancelled) setError(err.message);
       }
-    }
+    };
 
-    poll();
+    source.onerror = () => {
+      if (cancelled) return;
+      setError('Lost connection to job status stream.');
+      source.close();
+    };
+
     return () => {
       cancelled = true;
-      clearTimeout(timerRef.current);
+      source.close();
     };
   }, [jobId]);
 

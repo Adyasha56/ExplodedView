@@ -344,7 +344,7 @@ ExplodedView/
 [Node.js: cleanup.service deletes temp files]
         │
         ▼
-[Frontend polls /api/jobs/:jobId → status: done]
+[Frontend's SSE stream /api/jobs/:jobId/stream pushes status: done]
 [Frontend fetches /api/results/:jobId]
 [React: renders Cloudinary diagram + SVG hotspot overlays + BOM table]
 ```
@@ -478,7 +478,7 @@ TTL index: `createdAt` expires after **7 days**.
 | Method | Endpoint | Description | Response |
 |--------|----------|-------------|----------|
 | `POST` | `/api/upload` | Upload PDF, validate, create job, trigger pipeline | `{ jobId, status }` |
-| `GET` | `/api/jobs/:jobId` | Poll job status and current step | `{ jobId, status, currentStep, errorMessage }` |
+| `GET` | `/api/jobs/:jobId/stream` | Server-Sent Events stream of job status and current step | `text/event-stream` of `{ jobId, status, pipelineStep, errorMessage, ... }` |
 | `GET` | `/api/results/:jobId` | Fetch full result document | Full Result document |
 | `GET` | `/static/outputs/:jobId/diagram.png` | Serve diagram PNG (local dev only) | `image/png` |
 | `GET` | `/health` | Cloud Run health check | `{ status: "ok" }` |

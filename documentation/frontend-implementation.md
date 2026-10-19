@@ -58,11 +58,11 @@ frontend/
     ├── index.css            ← @tailwind base/components/utilities
     │
     ├── api/
-    │   └── pipeline.js      ← uploadPdf(), getJobStatus(), getResult()
+    │   └── pipeline.js      ← uploadPdf(), streamJobStatusUrl(), getResult()
     │
     ├── hooks/
     │   ├── useUpload.js     ← manages AbortController, POST /api/upload
-    │   └── useJobPoller.js  ← polls GET /api/jobs/:jobId every 2s
+    │   └── useJobPoller.js  ← subscribes to GET /api/jobs/:jobId/stream via SSE
     │
     ├── utils/
     │   └── pipelineSteps.js ← ordered step definitions + resolveStepStates()
@@ -94,7 +94,7 @@ upload state
   │  user selects PDF + clicks "Analyse PDF"
   ▼
 processing state
-  │  useJobPoller polls every 2s; PipelineTracker updates live
+  │  useJobPoller streams via SSE; PipelineTracker updates live
   │  on error → ErrorBanner with retry
   ▼
 viewer state
@@ -107,7 +107,7 @@ State variables in `Workspace.jsx`:
 - `file` — selected File object
 - `jobId` — set after successful upload
 - `selectedRef` — currently highlighted hotspot number (shared between canvas and BOM panel)
-- `job` — live poll result from `useJobPoller`
+- `job` — live SSE status from `useJobPoller`
 - `result` — final pipeline result document
 
 ---
@@ -138,10 +138,11 @@ State variables in `Workspace.jsx`:
 ## Phase 2 — Pipeline Tracker
 
 ### useJobPoller hook
-- Polls `GET /api/jobs/:jobId` every 2000ms using recursive `setTimeout`
-- Stops on `status: "done"` or `status: "error"`
+- Opens an `EventSource` to `GET /api/jobs/:jobId/stream` (Server-Sent Events)
+- Receives the current job state immediately, then an event on each pipeline step
+- Closes the connection on `status: "done"` or `status: "error"`
 - On `"done"`: immediately fetches `GET /api/results/:jobId` and sets `result`
-- Cleans up timer on unmount
+- Closes the `EventSource` on unmount
 
 ### pipelineSteps.js
 Defines the ordered step sequence and maps each backend `PipelineState` key to a user-friendly label:
@@ -225,7 +226,7 @@ When all 12 mappings are exact (confidence 1.0), Python never emits `LLM_VALIDAT
 | Call | When | Notes |
 |---|---|---|
 | `POST /api/upload` | User clicks "Analyse PDF" | `multipart/form-data`, field name `file` |
-| `GET /api/jobs/:jobId` | Every 2s during processing | Returns `{ status, pipelineStep, filename, errorMessage }` |
+| `GET /api/jobs/:jobId/stream` | Opened once during processing (SSE) | Pushes `{ status, pipelineStep, filename, errorMessage }` on each step |
 | `GET /api/results/:jobId` | Once, when `status === "done"` | Full result document |
 | `GET /static/outputs/:jobId/diagram.png` | In `<img src>` after result loaded | Proxied by Vite dev server to Express |
 

@@ -91,6 +91,8 @@ useEffect(() => {
 }, [jobId]);
 ```
 
+> Note (2026-10): `useJobPoller` was later migrated from `setTimeout` polling to a Server-Sent Events subscription (`GET /api/jobs/:jobId/stream`). The state-reset fix described above still applies unchanged — it resets `job`/`result`/`error` when `jobId` changes, now at the top of the `EventSource`-based effect instead of the polling loop.
+
 ---
 
 ## Problem 5: Yellow/Colored Callout Circles Not Detected

@@ -32,7 +32,7 @@
 | `src/models/Job.model.js` | **Working** | MongoDB schema for a processing job |
 | `src/models/Result.model.js` | **Working** | MongoDB schema for pipeline output |
 | `src/routes/upload.routes.js` | **Working** | Registers `POST /api/upload` route |
-| `src/routes/jobs.routes.js` | **Working** | Registers `GET /api/jobs/:jobId` and `GET /api/jobs/results/:jobId` |
+| `src/routes/jobs.routes.js` | **Working** | Registers `GET /api/jobs/:jobId/stream` (SSE) and `GET /api/jobs/results/:jobId` |
 | `src/controllers/upload.controller.js` | **Stub** | Returns 501 — implemented in Milestone 2 |
 | `src/controllers/jobs.controller.js` | **Stub** | Returns 501 — implemented in Milestone 2 |
 | `src/services/python.bridge.js` | **Stub** | Returns error — implemented in Milestone 2 |
@@ -183,7 +183,7 @@ This file's only job is to map the URL to the controller. No logic here.
 ### `backend/src/routes/jobs.routes.js` — Jobs Route Registration
 
 Registers two routes:
-- `GET /api/jobs/:jobId` → `jobs.controller.getJobStatus`
+- `GET /api/jobs/:jobId/stream` → `jobs.controller.streamJobStatus` (Server-Sent Events)
 - `GET /api/jobs/results/:jobId` → `jobs.controller.getResult`
 
 ---
@@ -201,7 +201,7 @@ When implemented in Milestone 2, this will:
 6. Call `python.bridge.runPipeline(jobId)` — starts the Python worker asynchronously
 7. Return `{ jobId, status: "pending" }` to the client immediately
 
-The pipeline runs in the background — the client polls for status.
+The pipeline runs in the background — the client subscribes to an SSE stream for status (replacing the earlier polling design).
 
 ---
 
@@ -211,7 +211,7 @@ The pipeline runs in the background — the client polls for status.
 
 When implemented in Milestone 2:
 
-`getJobStatus`: Reads the `Job` document by `jobId` and returns `{ jobId, status, currentStep, errorMessage }`.
+`streamJobStatus`: Opens an SSE connection, sends the current `Job` document state immediately, then pushes `{ jobId, status, pipelineStep, errorMessage, ... }` again each time the job updates, closing the stream on a terminal status.
 
 `getResult`: Reads the `Result` document by `jobId` and returns the full result JSON. Returns 404 if job is not done yet.
 
@@ -298,18 +298,18 @@ python.bridge.js (listening to stdout)
   │              → calls cleanup.service.cleanupJobFiles(jobId)
 ```
 
-### Poll Flow (Frontend polling for status)
+### Status Flow (Frontend SSE subscription for status)
 
 ```
 Client
-  │  GET /api/jobs/abc-123
+  │  GET /api/jobs/abc-123/stream  (EventSource, text/event-stream)
   ▼
-jobs.routes.js → jobs.controller.getJobStatus
-  │  reads Job from MongoDB
+jobs.routes.js → jobs.controller.streamJobStatus
+  │  reads Job from MongoDB, sends immediately, then subscribes to jobEvents
   ▼
-Client ← { jobId, status: "processing", currentStep: "circle_detection" }
+Client ← data: { jobId, status: "processing", pipelineStep: "circle_detection" }
 
-... client keeps polling until status = "done" ...
+... server pushes an event each pipeline step until status = "done" ...
 
 Client
   │  GET /api/jobs/results/abc-123
@@ -340,7 +340,7 @@ Client ← PNG image (no controller involved, served as static asset)
 |--------|-----|---------|----------|--------|
 | `GET` | `/health` | — | `{ status: "ok", env: "development" }` | **Live** |
 | `POST` | `/api/upload` | `multipart/form-data` with `file` | `{ jobId, status }` | **Stub (501)** |
-| `GET` | `/api/jobs/:jobId` | — | `{ jobId, status, currentStep, errorMessage }` | **Stub (501)** |
+| `GET` | `/api/jobs/:jobId/stream` | — | `text/event-stream` of `{ jobId, status, pipelineStep, errorMessage }` | **Stub (501)** |
 | `GET` | `/api/jobs/results/:jobId` | — | Full Result document | **Stub (501)** |
 | `GET` | `/static/outputs/:jobId/diagram.png` | — | PNG image | **Live** |
 
@@ -422,10 +422,10 @@ Expected response (after Milestone 2):
 
 ---
 
-#### Test 3 — Poll Job Status (currently returns 501 — implemented in Milestone 2)
+#### Test 3 — Stream Job Status via SSE (currently returns 501 — implemented in Milestone 2)
 
 ```
-GET http://localhost:5000/api/jobs/550e8400-e29b-41d4-a716-446655440000
+GET http://localhost:5000/api/jobs/550e8400-e29b-41d4-a716-446655440000/stream
 ```
 
 Expected response:

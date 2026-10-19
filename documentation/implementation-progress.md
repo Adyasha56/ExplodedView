@@ -140,7 +140,7 @@ multer v2 `diskStorage`. Generates a UUID v4, attaches it to `req.jobId`, saves 
 | File | Route | What it does |
 |---|---|---|
 | `upload.controller.js` | `POST /api/upload` | Validates `req.file`, creates Job (status: pending), fire-and-forgets Python bridge, returns `202 { jobId, status, message }` |
-| `jobs.controller.js` | `GET /api/jobs/:jobId` | Returns `{ jobId, filename, status, pipelineStep, errorMessage, createdAt, updatedAt }` |
+| `jobs.controller.js` | `GET /api/jobs/:jobId/stream` (SSE) | Streams `{ jobId, filename, status, pipelineStep, errorMessage, createdAt, updatedAt }` on each update |
 | `results.controller.js` | `GET /api/results/:jobId` | Returns Result doc. `409` if not done yet, `422` if job errored, `500` if Result doc is missing |
 
 ### Python Bridge — `backend/src/services/python.bridge.js`
@@ -161,7 +161,7 @@ Spawns `python main.py --job-id <id> --storage-path <path>` as a child process. 
 
 Mounts:
 - `POST /api/upload` — multer middleware → upload controller
-- `GET /api/jobs/:jobId` — jobs controller
+- `GET /api/jobs/:jobId/stream` — jobs controller (SSE)
 - `GET /api/results/:jobId` — results controller
 - `GET /static/outputs` — `express.static` serving diagram images
 - `GET /health` — returns `{ status: "ok", timestamp }`
